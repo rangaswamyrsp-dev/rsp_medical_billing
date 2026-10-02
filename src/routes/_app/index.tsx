@@ -503,6 +503,19 @@ function BillingPage() {
       .slice(0, 6);
   }, [query, medicines]);
 
+  const focusUnitsInput = (medicineId: string) => {
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        const el = (document.getElementById(`pack-qty-input-${medicineId}`) ||
+          document.getElementById(`qty-input-${medicineId}`)) as HTMLInputElement;
+        if (el) {
+          el.focus();
+          el.select();
+        }
+      }, 50);
+    });
+  };
+
   const addItem = (m: Medicine) => {
     const info = parsePackInfo(m);
     const unitMrp = calculateUnitMrp(m.mrp, info.packSize);
@@ -536,6 +549,7 @@ function BillingPage() {
     });
     setLastAddedId(m.id);
     setQuery("");
+    focusUnitsInput(m.id);
   };
 
   const onScan = (code: string) => {
@@ -674,8 +688,8 @@ function BillingPage() {
               it.looseQty && !it.packQty
                 ? it.unitLabel
                 : !it.looseQty && it.packQty
-                ? it.packLabel
-                : `${it.packLabel} + ${it.unitLabel}`,
+                  ? it.packLabel
+                  : `${it.packLabel} + ${it.unitLabel}`,
           };
         }),
         sub: +totals.sub.toFixed(2),
@@ -833,9 +847,9 @@ function BillingPage() {
     if (!found) return;
     setCustomer({ name: found.customerName, phone: found.phone, doctor: found.doctor ?? "" });
     setItems(found.items.map((it) => {
-      const info = parsePackInfo(it);
-      const unitMrp = calculateUnitMrp(it.mrp, info.packSize);
       const anyIt = it as any;
+      const info = parsePackInfo(anyIt);
+      const unitMrp = calculateUnitMrp(it.mrp, info.packSize);
       const packSize = anyIt.packSize ?? info.packSize;
       const isConvertible = anyIt.isConvertible ?? info.isConvertible;
       const packQty = anyIt.packQty ?? (packSize > 1 ? Math.floor(it.qty / packSize) : it.qty);
@@ -848,8 +862,8 @@ function BillingPage() {
         gst: it.gst,
         stock: 0,
         expiry: "",
-        company: (it as any).company ?? "",
-        pack: it.pack,
+        company: anyIt.company ?? "",
+        pack: anyIt.pack ?? "",
         packSize,
         isConvertible,
         packQty,
@@ -907,18 +921,18 @@ function BillingPage() {
                   <ReceiptText className="h-5 w-5" />
                 </div>
                 <div>
-                  <div className="text-xs text-muted-foreground">Invoice No.</div>
+                  {/* <div className="text-xs text-muted-foreground">Invoice No.</div> */}
                   <div className="font-semibold tracking-tight">{inv}</div>
                 </div>
               </div>
               <div>
-                <div className="text-xs text-muted-foreground">Date</div>
+                {/* <div className="text-xs text-muted-foreground">Date</div> */}
                 <div className="font-medium">{today || "—"}</div>
               </div>
               <div>
-                <div className="text-xs text-muted-foreground">Cashier</div>
+                {/* <div className="text-xs text-muted-foreground">{me?.role}</div> */}
                 <div className="font-medium">{me ? `${me.id} · ${me.name}` : "—"}</div>
-                <div className="text-[11px] text-muted-foreground">{me?.role}</div>
+                <div className="text-[11px] text-muted-foreground"></div>
               </div>
               <Badge variant="secondary" className="gap-1.5">
                 <Keyboard className="h-3.5 w-3.5" /> F2 New · F9 Save · F10 Print
@@ -1106,10 +1120,8 @@ function BillingPage() {
                 <TableHeader className="sticky top-0 z-10 bg-card">
                   <TableRow className="bg-muted/50">
                     <TableHead>{copy.item}</TableHead>
-                    {f.batchTracking && <TableHead className="w-20">Batch</TableHead>}
-                    {/* <TableHead className="w-24 text-center">Pack Qty</TableHead> */}
-                    <TableHead className="w-24 text-center">Units</TableHead>
-                    {/* <TableHead className="w-24 text-center">Total Units</TableHead> */}
+                    {f.batchTracking && <TableHead className="w-24">Batch</TableHead>}
+                    <TableHead className="w-36 text-center">Units</TableHead>
                     <TableHead className="w-24 text-right">{tenant.type === "Medical" ? "Rate (MRP)" : "Price"}</TableHead>
                     {f.gst && <TableHead className="w-16 text-center">GST</TableHead>}
                     <TableHead className="w-24 text-right">Total</TableHead>
@@ -1119,7 +1131,7 @@ function BillingPage() {
                 <TableBody>
                   {items.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={f.gst ? (f.batchTracking ? 9 : 8) : (f.batchTracking ? 8 : 7)} className="text-center py-16 text-muted-foreground">
+                      <TableCell colSpan={f.gst ? (f.batchTracking ? 7 : 6) : (f.batchTracking ? 6 : 5)} className="text-center py-16 text-muted-foreground">
                         <Search className="h-8 w-8 mx-auto mb-2 opacity-40" />
                         Search{f.barcode ? " or scan" : ""} a {copy.item.toLowerCase()} to add to the bill.
                       </TableCell>
@@ -1148,77 +1160,77 @@ function BillingPage() {
                           </TableCell>
                           {f.batchTracking && <TableCell className="text-sm font-mono">{it.batch}</TableCell>}
 
-                          {/* 1. Pack Qty (Number input only, space-saving) */}
-                          {/* <TableCell className="text-center">
-                            <Input
-                              id={`pack-qty-input-${it.id}`}
-                              type="number"
-                              min={0}
-                              tabIndex={0}
-                              value={it.packQty ?? 1}
-                              onFocus={(e) => e.target.select()}
-                              onChange={(e) => {
-                                const val = Math.max(0, parseInt(e.target.value, 10) || 0);
-                                updateItem(it.id, { packQty: val });
-                              }}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") {
-                                  e.preventDefault();
-                                  if (isConvert) {
-                                    const extraEl = document.getElementById(`extra-units-input-${it.id}`) as HTMLInputElement;
-                                    if (extraEl) {
-                                      extraEl.focus();
-                                      extraEl.select();
-                                      return;
-                                    }
-                                  }
-                                  searchInputRef.current?.focus();
-                                  searchInputRef.current?.select();
-                                }
-                              }}
-                              className="h-8 w-16 mx-auto text-center px-1 font-semibold [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                            />
-                            <div className="text-[10px] text-center text-muted-foreground mt-0.5">{pLabel}</div>
-                          </TableCell> */}
-
-                          {/* 2. Extra Units (Number input only, space-saving) */}
+                          {/* ── Units column: Pack input [+] Extra input (if convertible) ── */}
                           <TableCell className="text-center">
-                            {isConvert ? (
-                              <>
+                            <div className="flex items-center gap-1.5 justify-center">
+                              {/* Pack / Total-units input */}
+                              <div className="flex flex-col items-center">
                                 <Input
-                                  id={`extra-units-input-${it.id}`}
+                                  id={`pack-qty-input-${it.id}`}
                                   type="number"
                                   min={0}
-                                  max={packSize - 1}
                                   tabIndex={0}
-                                  value={it.looseQty ?? 0}
+                                  value={it.packQty ?? 1}
                                   onFocus={(e) => e.target.select()}
                                   onChange={(e) => {
                                     const val = Math.max(0, parseInt(e.target.value, 10) || 0);
-                                    updateItem(it.id, { looseQty: val });
+                                    updateItem(it.id, { packQty: val });
                                   }}
                                   onKeyDown={(e) => {
-                                    if (e.key === "Enter") {
+                                    if (e.key === "Enter" || e.key === "Tab") {
+                                      if (e.key === "Tab") return; // let normal tab flow
                                       e.preventDefault();
+                                      if (isConvert) {
+                                        const extraEl = document.getElementById(`extra-units-input-${it.id}`) as HTMLInputElement;
+                                        if (extraEl) { extraEl.focus(); extraEl.select(); return; }
+                                      }
                                       searchInputRef.current?.focus();
                                       searchInputRef.current?.select();
                                     }
                                   }}
-                                  className="h-8 w-16 mx-auto text-center px-1 font-semibold [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                                  className="h-8 w-14 text-center px-1 font-semibold [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                                 />
-                                <div className="text-[10px] text-center text-muted-foreground mt-0.5">{uLabel}</div>
-                              </>
-                            ) : (
-                              <div className="text-center text-xs text-muted-foreground">—</div>
+                                <div className="text-[10px] text-muted-foreground mt-0.5">{pLabel}</div>
+                              </div>
+
+                              {/* Extra loose units (only for convertible medicines) */}
+                              {isConvert && (
+                                <>
+                                  <span className="text-xs font-bold text-muted-foreground">+</span>
+                                  <div className="flex flex-col items-center">
+                                    <Input
+                                      id={`extra-units-input-${it.id}`}
+                                      type="number"
+                                      min={0}
+                                      max={packSize - 1}
+                                      tabIndex={0}
+                                      value={it.looseQty ?? 0}
+                                      onFocus={(e) => e.target.select()}
+                                      onChange={(e) => {
+                                        const val = Math.max(0, parseInt(e.target.value, 10) || 0);
+                                        updateItem(it.id, { looseQty: val });
+                                      }}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter") {
+                                          e.preventDefault();
+                                          searchInputRef.current?.focus();
+                                          searchInputRef.current?.select();
+                                        }
+                                      }}
+                                      className="h-8 w-14 text-center px-1 font-semibold [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                                    />
+                                    <div className="text-[10px] text-muted-foreground mt-0.5">{uLabel}</div>
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                            {/* Total units summary badge (shown ONLY for convertible pack items) */}
+                            {isConvert && (
+                              <div className="text-[10px] text-center text-muted-foreground mt-0.5 tabular-nums">
+                                = {it.qty} {uLabel}{it.qty === 1 ? "" : "s"}
+                              </div>
                             )}
                           </TableCell>
-
-                          {/* 3. Total Units */}
-                          {/* <TableCell className="text-center">
-                            <Badge variant="secondary" className="font-mono text-xs font-semibold px-2 py-0.5">
-                              {it.qty} {uLabel}{it.qty === 1 ? "" : "s"}
-                            </Badge>
-                          </TableCell> */}
 
                           {/* 4. MRP / Rate */}
                           <TableCell className="text-right tabular-nums">

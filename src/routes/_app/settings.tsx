@@ -11,7 +11,15 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from "@/components/ui/dialog";
-import { Settings2, Printer, TestTube, Cloud, AlertTriangle, RotateCcw, Sparkles, Camera, Check } from "lucide-react";
+import { Settings2, Printer, TestTube, Cloud, AlertTriangle, RotateCcw, Sparkles, Camera, Check, ScanBarcode, QrCode, ShieldCheck } from "lucide-react";
+import { useEffect } from "react";
+import {
+  LABEL_PRESETS,
+  DEFAULT_BARCODE_LABEL_SETTINGS,
+  type BarcodeLabelSettings,
+  type LabelPresetKey,
+  saveBarcodeSettings,
+} from "@/lib/barcode-settings";
 import { actions, useStore } from "@/lib/store";
 import { printReceipt } from "@/lib/print";
 import { useTenant } from "@/lib/tenant";
@@ -32,23 +40,47 @@ function SettingsPage() {
   const gUser = getStoredGDriveUser();
   const lastBackup = getLastBackupInfo(currentTenantId);
 
-  const [aiKey, setAiKey] = useState(() => {
+  useEffect(() => {
+    // Purge any legacy client-side AI keys
     if (typeof window !== "undefined") {
-      return localStorage.getItem("rsp_gemini_api_key") || "";
+      localStorage.removeItem("rsp_gemini_api_key");
+      sessionStorage.removeItem("rsp_gemini_api_key");
     }
-    return "";
-  });
+  }, []);
 
   const [resetDialogOpen, setResetDialogOpen] = useState(false);
   const [resetConfirmText, setResetConfirmText] = useState("");
   const [resetting, setResetting] = useState(false);
 
-  const handleSaveAiKey = () => {
-    localStorage.setItem("rsp_gemini_api_key", aiKey.trim());
-    toast.success("AI Vision API Key saved successfully");
+  const update = (patch: any) => actions.updatePrinter(patch);
+
+  const labelSettings = p.labelSettings || DEFAULT_BARCODE_LABEL_SETTINGS;
+
+  const updateLabelSetting = <K extends keyof BarcodeLabelSettings>(
+    key: K,
+    val: BarcodeLabelSettings[K]
+  ) => {
+    const next = { ...labelSettings, [key]: val };
+    saveBarcodeSettings(next);
+    actions.updatePrinter({ labelSettings: next });
   };
 
-  const update = (patch: any) => actions.updatePrinter(patch);
+  const applyLabelPreset = (presetKey: LabelPresetKey) => {
+    const meta = LABEL_PRESETS.find((x) => x.key === presetKey);
+    if (!meta) return;
+    const next: BarcodeLabelSettings = {
+      ...labelSettings,
+      preset: presetKey,
+      widthMm: meta.widthMm,
+      heightMm: meta.heightMm,
+      columns: meta.columns,
+      gapMm: meta.gapMm,
+      marginMm: meta.marginMm,
+    };
+    saveBarcodeSettings(next);
+    actions.updatePrinter({ labelSettings: next });
+    toast.success(`Applied ${meta.name}`);
+  };
 
   const testPrint = () => {
     const testSale = {
@@ -135,7 +167,7 @@ function SettingsPage() {
         </div>
       </Card>
 
-      {/* ── AI Vision / Bill Scanning Settings ── */}
+      {/* ── Secure AI Medicine Image Extraction ── */}
       <Card className="p-5 space-y-3">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-2.5">
@@ -144,41 +176,28 @@ function SettingsPage() {
             </div>
             <div>
               <div className="font-semibold text-sm flex items-center gap-2">
-                AI Vision & Bill Scanner
-                {aiKey ? (
-                  <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-200 text-xs gap-1">
-                    <Check className="h-3 w-3" /> Configured
-                  </Badge>
-                ) : (
-                  <Badge variant="secondary" className="text-xs">
-                    Not Configured
-                  </Badge>
-                )}
+                AI Vision & Medicine Invoice Extraction
+                <Badge variant="outline" className="bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800 text-xs gap-1">
+                  <Check className="h-3 w-3" /> Secure Backend
+                </Badge>
               </div>
               <p className="text-xs text-muted-foreground">
-                Powers the <b>Add from Photo</b> feature in Inventory and Medicines to extract invoices, strips, and HSN codes.
+                Powers the <b>Add from Photo</b> feature in Medicines to safely extract distributor invoices, strips, and line items.
               </p>
             </div>
           </div>
         </div>
 
-        <div className="pt-2 border-t space-y-2">
-          <Label className="text-xs font-medium">ChatGPT / OpenAI / Gemini Vision API Key</Label>
-          <div className="flex items-center gap-2">
-            <Input
-              type="password"
-              placeholder="Paste OpenAI (sk-...) or Gemini (AIza...) Key"
-              value={aiKey}
-              onChange={(e) => setAiKey(e.target.value)}
-              className="h-8 text-xs font-mono max-w-md"
-            />
-            <Button size="sm" onClick={handleSaveAiKey} className="h-8 text-xs">
-              Save Key
-            </Button>
+        <div className="pt-2 border-t space-y-2 text-xs text-muted-foreground">
+          <div className="flex items-start gap-2 p-3 bg-muted/40 rounded-lg">
+            <ShieldCheck className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <span className="font-medium text-foreground">Zero Frontend Exposure Architecture</span>
+              <p>
+                AI provider API keys are never stored in your browser, React state, or local storage. Extraction runs securely inside the Supabase Edge Function (<code>extract-medicine-data</code>) using server-side secrets.
+              </p>
+            </div>
           </div>
-          <p className="text-[11px] text-muted-foreground">
-            Supports OpenAI ChatGPT API keys (<code>sk-...</code>) and Google Gemini keys (<code>AIza...</code>). Keys are stored securely in your local browser session and used for bill/strip scanning.
-          </p>
         </div>
       </Card>
 
@@ -232,6 +251,153 @@ function SettingsPage() {
         <div className="flex gap-2">
           <Button onClick={testPrint}><TestTube className="h-4 w-4 mr-1.5" /> Print test receipt</Button>
           <Button variant="outline" onClick={() => toast.success("Settings saved")}>Save</Button>
+        </div>
+      </Card>
+
+      {/* ── Barcode & QR Label Printing Settings ── */}
+      <Card className="p-5 space-y-4">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div className="flex items-center gap-2 font-semibold">
+            <ScanBarcode className="h-5 w-5 text-primary" /> Barcode & QR Label Printing
+          </div>
+          <Link
+            to="/barcode"
+            className="text-xs text-primary font-medium hover:underline flex items-center gap-1"
+          >
+            Open Label Printing →
+          </Link>
+        </div>
+
+        <p className="text-xs text-muted-foreground">
+          Default printer specifications, sticker sheet format, and fields displayed on generated product labels.
+        </p>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-1.5 sm:col-span-2">
+            <Label className="text-xs">Standard Label Roll or Sticker Sheet Preset</Label>
+            <Select
+              value={labelSettings.preset}
+              onValueChange={(v: LabelPresetKey) => applyLabelPreset(v)}
+            >
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {LABEL_PRESETS.map((item) => (
+                  <SelectItem key={item.key} value={item.key}>
+                    {item.name} ({item.category})
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label className="text-xs">Barcode Format</Label>
+            <Select
+              value={labelSettings.barcodeType}
+              onValueChange={(v: any) => updateLabelSetting("barcodeType", v)}
+            >
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="code128">Code 128 (1D Linear Barcode)</SelectItem>
+                <SelectItem value="qr">QR Code (2D Data Matrix)</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label className="text-xs">Custom Pharmacy Name on Label</Label>
+            <Input
+              placeholder={p.storeName}
+              value={labelSettings.customStoreName}
+              onChange={(e) => updateLabelSetting("customStoreName", e.target.value)}
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <Label className="text-xs">Label Width (mm)</Label>
+            <Input
+              type="number"
+              value={labelSettings.widthMm}
+              onChange={(e) => updateLabelSetting("widthMm", Math.max(10, Number(e.target.value) || 10))}
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <Label className="text-xs">Label Height (mm)</Label>
+            <Input
+              type="number"
+              value={labelSettings.heightMm}
+              onChange={(e) => updateLabelSetting("heightMm", Math.max(10, Number(e.target.value) || 10))}
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <Label className="text-xs">Columns (across sheet/roll)</Label>
+            <Input
+              type="number"
+              min={1}
+              max={8}
+              value={labelSettings.columns}
+              onChange={(e) => updateLabelSetting("columns", Math.max(1, Number(e.target.value) || 1))}
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <Label className="text-xs">Gap between labels (mm)</Label>
+            <Input
+              type="number"
+              value={labelSettings.gapMm}
+              onChange={(e) => updateLabelSetting("gapMm", Math.max(0, Number(e.target.value) || 0))}
+            />
+          </div>
+        </div>
+
+        <div className="pt-2 border-t space-y-2">
+          <Label className="text-xs font-semibold">Included Label Fields</Label>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+            <label className="flex items-center justify-between p-2 rounded border cursor-pointer hover:bg-muted/40">
+              <span>Store Name</span>
+              <Switch
+                checked={labelSettings.showStoreName}
+                onCheckedChange={(v) => updateLabelSetting("showStoreName", v)}
+              />
+            </label>
+            <label className="flex items-center justify-between p-2 rounded border cursor-pointer hover:bg-muted/40">
+              <span>Medicine Name</span>
+              <Switch
+                checked={labelSettings.showMedicineName}
+                onCheckedChange={(v) => updateLabelSetting("showMedicineName", v)}
+              />
+            </label>
+            <label className="flex items-center justify-between p-2 rounded border cursor-pointer hover:bg-muted/40">
+              <span>Batch Number</span>
+              <Switch
+                checked={labelSettings.showBatch}
+                onCheckedChange={(v) => updateLabelSetting("showBatch", v)}
+              />
+            </label>
+            <label className="flex items-center justify-between p-2 rounded border cursor-pointer hover:bg-muted/40">
+              <span>Expiry Date</span>
+              <Switch
+                checked={labelSettings.showExpiry}
+                onCheckedChange={(v) => updateLabelSetting("showExpiry", v)}
+              />
+            </label>
+            <label className="flex items-center justify-between p-2 rounded border cursor-pointer hover:bg-muted/40">
+              <span>MRP (₹)</span>
+              <Switch
+                checked={labelSettings.showMrp}
+                onCheckedChange={(v) => updateLabelSetting("showMrp", v)}
+              />
+            </label>
+            <label className="flex items-center justify-between p-2 rounded border cursor-pointer hover:bg-muted/40">
+              <span>Packing Info</span>
+              <Switch
+                checked={labelSettings.showPacking}
+                onCheckedChange={(v) => updateLabelSetting("showPacking", v)}
+              />
+            </label>
+          </div>
         </div>
       </Card>
 

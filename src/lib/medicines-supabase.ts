@@ -195,9 +195,15 @@ export async function sb_bulkInsertMedicines(tenantId: string, list: Medicine[])
   if (!tenantId || list.length === 0) return { error: null };
 
   const rows = list.map((m) => medicineToRow(tenantId, m));
-  const { error } = await supabase
-    .from("medicines")
-    .insert(rows);
+  const CHUNK_SIZE = 200;
+  for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+    const chunk = rows.slice(i, i + CHUNK_SIZE);
+    const { error } = await supabase
+      .from("medicines")
+      .insert(chunk);
 
-  return { error: error?.message ?? null };
+    if (error) return { error: error.message };
+  }
+
+  return { error: null };
 }

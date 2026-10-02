@@ -149,11 +149,15 @@ export async function sb_insertPurchase(tenantId: string, purchase: Purchase): P
       };
     });
 
-    const { error: iError } = await supabase
-      .from("purchase_items")
-      .insert(itemRows);
+    const CHUNK_SIZE = 200;
+    for (let i = 0; i < itemRows.length; i += CHUNK_SIZE) {
+      const chunk = itemRows.slice(i, i + CHUNK_SIZE);
+      const { error: iError } = await supabase
+        .from("purchase_items")
+        .insert(chunk);
 
-    if (iError) return { error: iError.message };
+      if (iError) return { error: iError.message };
+    }
   }
 
   return { error: null };

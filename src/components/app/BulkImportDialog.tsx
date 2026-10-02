@@ -123,8 +123,8 @@ export function BulkImportDialog<T>({ open, onOpenChange, title, columns, exampl
       setText(out.tsv);
       toast.success("✓ Details extracted from photo — review and edit before importing");
     } catch (e: any) {
-      const msg = e?.message?.includes("AI is not configured")
-        ? "AI is not configured. Add an AI_API_KEY to your .env file to enable photo import."
+      const msg = e?.message?.includes("not configured")
+        ? "AI extraction is not configured. Please configure the backend AI secret (AI_API_KEY)."
         : "Could not read that photo. Make sure the image is clear and well-lit.";
       setPhotoError(msg);
       toast.error(msg);
@@ -222,7 +222,7 @@ export function BulkImportDialog<T>({ open, onOpenChange, title, columns, exampl
                 <div className="text-xs text-emerald-700/80 mt-0.5">
                   Select a photo of a stockist bill or product list — AI reads the details and fills the table for you.
                   <br />
-                  <span className="text-[11px] text-muted-foreground">Requires AI_API_KEY in .env · Works best with clear, well-lit photos</span>
+                  <span className="text-[11px] text-muted-foreground">Secure Supabase Edge Function AI extraction · Works best with clear, well-lit photos</span>
                 </div>
               </div>
               <input

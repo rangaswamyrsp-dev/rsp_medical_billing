@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Receipt, ShoppingCart, PackageSearch, Pill, Users, Truck,
   UserCog, BarChart3, Percent, Wallet, ScanBarcode, QrCode, Settings, DatabaseBackup, LogOut,
   HelpCircle, ShieldCheck, PanelLeftClose, PanelLeftOpen, Store, UtensilsCrossed,
-  ShoppingBasket, Wrench, CreditCard,
+  ShoppingBasket, Wrench, CreditCard, RotateCcw,
 } from "lucide-react";
 import { logout, getUser, CAN, type Role } from "@/lib/auth";
 import { cn } from "@/lib/utils";
@@ -19,7 +19,9 @@ const ALL_NAV: Item[] = [
   { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard, cap: "dashboard", feat: "dashboard" },
   { to: "/", label: "Billing", icon: Receipt, highlight: true, cap: "billing", feat: "billing" },
   { to: "/sales", label: "Sales", icon: ShoppingCart, cap: "sales", feat: "sales" },
+  { to: "/sales-returns", label: "Sales Returns", icon: RotateCcw, cap: "sales", feat: "sales" },
   { to: "/purchase", label: "Purchase", icon: Truck, cap: "purchase", feat: "purchase" },
+  { to: "/purchase-returns", label: "Purchase Returns", icon: RotateCcw, cap: "purchase", feat: "purchase" },
   { to: "/inventory", label: "Inventory", icon: PackageSearch, cap: "inventory", feat: "inventory" },
   { to: "/medicines", icon: Pill, cap: "medicines", feat: "medicines", itemsLabel: true },
   { to: "/customers", label: "Customers", icon: Users, cap: "customers", feat: "customers" },

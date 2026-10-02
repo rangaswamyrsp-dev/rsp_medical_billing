@@ -6,9 +6,10 @@ export interface ParsedImportRow {
   name: string;
   supplier?: string;
   invoiceNo?: string;
+  supplierDate?: string;
   company: string; // MFR
   type: string;
-  category: string;
+  drugName: string; // Drug Name / Composition (Category removed)
   hsn: string;
   pack: string;
   batch: string;
@@ -17,11 +18,12 @@ export interface ParsedImportRow {
   cost: number;
   gst: number;
   stock: number; // Qty
-  check?: string; // e.g. "OK · 98%"
+  unit?: string;
+  check?: string;
   source?: string;
 }
 
-export const SAMPLE_EXCEL_PASTE_TEXT = `Medicine Name\tSupplier\tInvoice No\tMFR\tType\tCategory\tHSN\tPack\tBatch\tExpiry\tMRP\tPurchase Price\tGST\tQuantity\nCETABLOCK TRIO\tAMBIKAA MEDINEEDS\t2600073008278\tATO\tTablet\tAntibiotic\t30049099\t10x10\t25S3GTB062\t2027 08\t201.56\t170.00\t5\t10`;
+export const SAMPLE_EXCEL_PASTE_TEXT = `Medicine Name\tSupplier\tInvoice No\tSupplier Date\tMFR\tDrug Name / Composition\tType\tHSN\tPack\tBatch\tExpiry\tMRP\tPurchase Price\tGST\tQuantity\tUnit\nCETABLOCK TRIO\tAMBIKAA MEDINEEDS\t2600073008278\t29/09/2026\tATO\tACECLOFENAC + PARACETAMOL\tTablet\t30049099\t10x10\t25S3GTB062\t2027-08\t201.56\t170.00\t5\t10\tTablet`;
 
 /** Format date string or excel serial to YYYY-MM */
 export function normalizeExpiryDate(val: any): string {
@@ -269,20 +271,22 @@ export async function parseMedicineExcelFile(file: File): Promise<ParsedImportRo
     });
   };
 
-  const nameKey = findKey(["medicinename", "itemname", "productname", "itemdescription", "medicine", "product", "name"]);
+  const nameKey = findKey(["itemname", "medicinename", "productname", "itemdescription", "medicine", "product", "name"]);
   const supplierKey = findKey(["supplier", "suppliername", "distributor", "party", "wholesaler", "vendor", "agency"]);
   const invoiceKey = findKey(["invoiceno", "invoice", "billno", "billnumber", "invno", "invoicenumber"]);
+  const dateKey = findKey(["supplierdate", "invoicedate", "billdate", "date"]);
   const mfrKey = findKey(["manufacturer", "mfr", "company", "mfg", "brand", "make"]);
-  const typeKey = findKey(["medicinetype", "type", "dosageform", "form"]);
-  const catKey = findKey(["category", "composition", "generic", "genericname", "group"]);
+  const drugKey = findKey(["drugnames", "drugname", "composition", "drugnamecomposition", "generic", "genericname", "salt", "saltcomposition", "molecule", "contents"]);
+  const typeKey = findKey(["types", "type", "medicinetype", "dosageform", "form"]);
   const hsnKey = findKey(["hsncode", "hsn", "hsnsac", "sac", "hsnno"]);
   const gstKey = findKey(["gst", "gstpercent", "taxpercent", "taxrate", "gstslab", "tax"]);
   const packKey = findKey(["packsize", "pack", "packing", "pkg", "package"]);
-  const batchKey = findKey(["batch", "batchno", "batchnumber", "lot", "lotno"]);
+  const batchKey = findKey(["batchno", "batch", "batchnumber", "lot", "lotno"]);
   const expiryKey = findKey(["expiry", "expirydate", "exp", "expdate"]);
   const mrpKey = findKey(["mrp", "maxretailprice", "retailprice", "price"]);
   const costKey = findKey(["purchaseprice", "purchaserate", "cost", "prate", "rate", "costprice", "purrate", "newrate", "basicrate"]);
   const qtyKey = findKey(["quantity", "qty", "stock", "stockqty", "units", "count"]);
+  const unitKey = findKey(["unit", "units", "uom", "sellingunit"]);
 
   const result: ParsedImportRow[] = [];
 
@@ -294,9 +298,10 @@ export async function parseMedicineExcelFile(file: File): Promise<ParsedImportRo
 
     const supplier = supplierKey ? String(row[supplierKey] ?? "").trim() : "";
     const invoiceNo = invoiceKey ? String(row[invoiceKey] ?? "").trim() : "";
+    const supplierDate = dateKey ? String(row[dateKey] ?? "").trim() : "";
     const company = mfrKey ? String(row[mfrKey] ?? "").trim() : "";
+    const drugName = drugKey ? String(row[drugKey] ?? "").trim() : "";
     const type = typeKey ? String(row[typeKey] ?? "").trim() : "";
-    const category = catKey ? String(row[catKey] ?? "").trim() : "";
     const hsn = hsnKey ? normalizeHsnCode(row[hsnKey]) : "";
     const batch = batchKey ? String(row[batchKey] ?? "").trim() : "";
     const rawExp = expiryKey ? row[expiryKey] : "";
@@ -307,15 +312,17 @@ export async function parseMedicineExcelFile(file: File): Promise<ParsedImportRo
     const gstVal = gstKey ? Number(String(row[gstKey]).replace(/[^0-9.]/g, "")) || 5 : 5;
     const pack = packKey ? String(row[packKey] ?? "").trim() : "";
     const stock = qtyKey ? Number(String(row[qtyKey]).replace(/[^0-9.]/g, "")) || 0 : 0;
+    const unit = unitKey ? String(row[unitKey] ?? "").trim() : "";
 
     result.push({
       id: `row-${i}-${Date.now()}`,
       name,
       supplier,
       invoiceNo,
+      supplierDate,
       company, // Keep short name verbatim
+      drugName, // Drug Name / Composition
       type,
-      category,
       hsn,
       pack,
       batch,
@@ -324,7 +331,8 @@ export async function parseMedicineExcelFile(file: File): Promise<ParsedImportRo
       cost: costVal,
       gst: gstVal,
       stock,
-      check: hsn ? "OK · 98%" : "Check HSN",
+      unit: unit || type || "Tablet",
+      check: "OK",
       source: "Excel",
     });
   }
@@ -367,24 +375,26 @@ export function parseMedicinePastedText(rawText: string): ParsedImportRow[] {
     return headers.findIndex((h) => cands.some((c) => h.includes(c) || c.includes(h)));
   };
 
-  const nameIdx = findIdx(["medicinename", "itemname", "productname", "medicine", "product", "name"]);
+  const nameIdx = findIdx(["itemname", "medicinename", "productname", "medicine", "product", "name"]);
   const isHeader = nameIdx !== -1;
 
   const dataRows = isHeader ? rows.slice(1) : rows;
 
-  const supplierIdx = isHeader ? findIdx(["supplier", "distributor", "party", "vendor"]) : 1;
-  const invIdx = isHeader ? findIdx(["invoiceno", "invoice", "billno", "invno"]) : 2;
-  const mfrIdx = isHeader ? findIdx(["mfr", "company", "manufacturer", "make"]) : 3;
-  const typeIdx = isHeader ? findIdx(["type", "dosageform", "form"]) : 4;
-  const catIdx = isHeader ? findIdx(["category", "composition", "generic"]) : 5;
-  const hsnIdx = isHeader ? findIdx(["hsn", "hsncode", "sac"]) : 6;
-  const packIdx = isHeader ? findIdx(["pack", "packsize", "packing"]) : 7;
-  const batchIdx = isHeader ? findIdx(["batch", "lot", "batchno"]) : 8;
-  const expIdx = isHeader ? findIdx(["expiry", "exp", "expdate"]) : 9;
-  const mrpIdx = isHeader ? findIdx(["mrp", "retailprice", "price"]) : 10;
-  const costIdx = isHeader ? findIdx(["purchaseprice", "purchaserate", "cost", "rate", "purchase"]) : 11;
-  const gstIdx = isHeader ? findIdx(["gst", "tax"]) : 12;
-  const qtyIdx = isHeader ? findIdx(["quantity", "qty", "stock"]) : 13;
+  const supplierIdx = isHeader ? findIdx(["supplier", "distributor", "party", "vendor"]) : -1;
+  const invIdx = isHeader ? findIdx(["invoiceno", "invoice", "billno", "invno"]) : -1;
+  const dateIdx = isHeader ? findIdx(["supplierdate", "invoicedate", "billdate", "date"]) : -1;
+  const mfrIdx = isHeader ? findIdx(["manufacturer", "mfr", "company", "make"]) : 1;
+  const drugIdx = isHeader ? findIdx(["drugnames", "drugname", "composition", "generic", "salt"]) : -1;
+  const typeIdx = isHeader ? findIdx(["types", "type", "dosageform", "form"]) : 2;
+  const hsnIdx = isHeader ? findIdx(["hsn", "hsncode", "sac"]) : -1;
+  const packIdx = isHeader ? findIdx(["pack", "packsize", "packing"]) : -1;
+  const batchIdx = isHeader ? findIdx(["batchno", "batch", "lot"]) : 3;
+  const expIdx = isHeader ? findIdx(["expiry", "exp", "expdate"]) : -1;
+  const mrpIdx = isHeader ? findIdx(["mrp", "retailprice", "price"]) : -1;
+  const costIdx = isHeader ? findIdx(["purchaseprice", "purchaserate", "cost", "rate", "purchase"]) : -1;
+  const gstIdx = isHeader ? findIdx(["gst", "tax"]) : -1;
+  const qtyIdx = isHeader ? findIdx(["quantity", "qty", "stock"]) : -1;
+  const unitIdx = isHeader ? findIdx(["unit", "units", "uom", "sellingunit"]) : -1;
 
   const actualNameIdx = isHeader ? nameIdx : 0;
 
@@ -396,9 +406,10 @@ export function parseMedicinePastedText(rawText: string): ParsedImportRow[] {
 
     const supplier = supplierIdx !== -1 ? cols[supplierIdx] || "" : "";
     const invoiceNo = invIdx !== -1 ? cols[invIdx] || "" : "";
+    const supplierDate = dateIdx !== -1 ? cols[dateIdx] || "" : "";
     const company = mfrIdx !== -1 ? cols[mfrIdx] || "" : "";
+    const drugName = drugIdx !== -1 ? cols[drugIdx] || "" : "";
     const type = typeIdx !== -1 ? cols[typeIdx] || "" : "";
-    const category = catIdx !== -1 ? cols[catIdx] || "" : "";
     const hsn = hsnIdx !== -1 ? normalizeHsnCode(cols[hsnIdx]) : "";
     const pack = packIdx !== -1 ? cols[packIdx] || "" : "";
     const batch = batchIdx !== -1 ? cols[batchIdx] || "" : "";
@@ -408,15 +419,17 @@ export function parseMedicinePastedText(rawText: string): ParsedImportRow[] {
     const cost = costIdx !== -1 ? Number(String(cols[costIdx]).replace(/[^0-9.]/g, "")) || 0 : 0;
     const gst = gstIdx !== -1 ? Number(String(cols[gstIdx]).replace(/[^0-9.]/g, "")) || 5 : 5;
     const stock = qtyIdx !== -1 ? Number(String(cols[qtyIdx]).replace(/[^0-9.]/g, "")) || 1 : 1;
+    const unit = unitIdx !== -1 ? cols[unitIdx] || "" : "";
 
     results.push({
       id: `paste-${idx}-${Date.now()}`,
       name,
       supplier,
       invoiceNo,
+      supplierDate,
       company,
+      drugName, // Drug Name / Composition
       type,
-      category,
       hsn,
       pack,
       batch,
@@ -425,7 +438,8 @@ export function parseMedicinePastedText(rawText: string): ParsedImportRow[] {
       cost,
       gst,
       stock,
-      check: hsn ? "OK · 98%" : "Check HSN",
+      unit: unit || type || "Tablet",
+      check: "OK",
       source: "Pasted",
     });
   });

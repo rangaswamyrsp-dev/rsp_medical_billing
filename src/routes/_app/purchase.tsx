@@ -11,7 +11,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
 import { Plus, Trash2, Truck } from "lucide-react";
-import { actions, useStore } from "@/lib/store";
+import { actions, useStore, type Medicine } from "@/lib/store";
 import { parsePackInfo } from "@/lib/medicine-units";
 import { toast } from "sonner";
 
@@ -62,7 +62,7 @@ function PurchasePage() {
       const meds = useStore.getState().medicines;
       valid.forEach((r) => {
         const existing = meds.find(
-          (m) => m.name.toLowerCase() === r.name.toLowerCase()
+          (m: Medicine) => m.name.toLowerCase() === r.name.toLowerCase()
         );
         const pInfo = parsePackInfo(existing || { pack: "" });
         const baseStock = pInfo.packSize > 1 ? r.qty * pInfo.packSize : r.qty;

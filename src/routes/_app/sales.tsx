@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
-import { Printer, Search, ShoppingCart, XCircle } from "lucide-react";
+import { Printer, RotateCcw, Search, ShoppingCart, XCircle } from "lucide-react";
 import { actions, useStore } from "@/lib/store";
 import { printReceipt } from "@/lib/print";
 import { getUser, CAN } from "@/lib/auth";
@@ -25,6 +25,7 @@ function SalesPage() {
   const printer = useStore((s) => s.printer);
   const [query, setQuery] = useState("");
   const [me, setMe] = useState<ReturnType<typeof getUser>>(null);
+  const navigate = useNavigate();
   useEffect(() => {
     setMe(getUser());
     actions.syncSales();
@@ -123,6 +124,16 @@ function SalesPage() {
                   <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => printReceipt(s, printer, medicines)}>
                     <Printer className="h-4 w-4" />
                   </Button>
+                  {s.status !== "cancelled" && (
+                    <Button
+                      size="icon" variant="ghost"
+                      className="h-8 w-8 text-primary"
+                      title="Process return for this bill"
+                      onClick={() => navigate({ to: "/sales-returns" })}
+                    >
+                      <RotateCcw className="h-4 w-4" />
+                    </Button>
+                  )}
                   {s.status !== "cancelled" && canCancel && (
                     <Button
                       size="icon" variant="ghost"

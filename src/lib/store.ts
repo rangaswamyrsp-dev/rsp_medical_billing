@@ -62,6 +62,17 @@ import {
   sb_fetchAuditLogs,
   sb_insertAuditLog,
 } from "@/lib/audit-supabase";
+import {
+  sb_fetchSalesReturns,
+  sb_insertSalesReturn,
+  sb_deleteSalesReturn,
+} from "@/lib/sales-returns-supabase";
+import {
+  sb_fetchPurchaseReturns,
+  sb_insertPurchaseReturn,
+  sb_deletePurchaseReturn,
+} from "@/lib/purchase-returns-supabase";
+import { DEFAULT_BARCODE_LABEL_SETTINGS, type BarcodeLabelSettings } from "@/lib/barcode-settings";
 import type { TenantBackupPayload } from "@/lib/gdrive-backup";
 
 
@@ -136,6 +147,38 @@ export type Sale = {
   cashierName?: string;
 };
 
+export type SalesReturnItem = {
+  medicineId: string;
+  medicineName: string;
+  batch: string;
+  expiry: string;
+  returnedQty: number;  // base units being returned
+  originalQty: number;  // original base units sold
+  unit: string;
+  rate: number;         // per-unit rate (unitMrp)
+  gst: number;
+  returnAmount: number;
+};
+
+export type SalesReturn = {
+  id: string;
+  tenantId?: string;
+  returnNo: string;
+  originalSaleId: string;
+  customerId: string | null;
+  customerName: string;
+  phone: string;
+  items: SalesReturnItem[];
+  returnAmount: number;
+  gstAmount: number;
+  reason: string;
+  returnDate: string;
+  status: "completed" | "cancelled";
+  processedBy: string;
+  processedByName: string;
+  createdAt: string;
+};
+
 export type Purchase = {
   id: string;
   date: string;
@@ -144,6 +187,36 @@ export type Purchase = {
   invoiceNo: string;
   items: { name: string; batch: string; qty: number; rate: number; gst: number }[];
   total: number;
+};
+
+export type PurchaseReturnItem = {
+  medicineId: string;
+  medicineName: string;
+  batch: string;
+  expiry: string;
+  returnedQty: number;  // units being returned to supplier
+  originalQty: number;  // original qty in purchase
+  purchaseRate: number; // rate per unit from purchase
+  gst: number;
+  returnAmount: number;
+};
+
+export type PurchaseReturn = {
+  id: string;
+  tenantId?: string;
+  returnNo: string;
+  originalPurchaseId: string;
+  supplierId: string | null;
+  supplierName: string;
+  returnAmount: number;
+  gstAmount: number;
+  reason: string;
+  returnDate: string;
+  status: "completed" | "cancelled";
+  processedBy: string;
+  processedByName: string;
+  items: PurchaseReturnItem[];
+  createdAt: string;
 };
 
 export type PrinterSettings = {
@@ -157,6 +230,7 @@ export type PrinterSettings = {
   showLogo: boolean;
   copies: number;
   autoPrint: boolean;
+  labelSettings?: BarcodeLabelSettings;
 };
 
 export type AuditEntry = {
@@ -266,6 +340,7 @@ const DEFAULT_PRINTER: PrinterSettings = {
   showLogo: true,
   copies: 1,
   autoPrint: false,
+  labelSettings: DEFAULT_BARCODE_LABEL_SETTINGS,
 };
 
 const SEED_CUSTOMERS: Customer[] = [];
@@ -285,6 +360,8 @@ type State = {
   employees: Employee[];
   sales: Sale[];
   purchases: Purchase[];
+  salesReturns: SalesReturn[];
+  purchaseReturns: PurchaseReturn[];
   printer: PrinterSettings;
   audit: AuditEntry[];
   held: HeldBill[];
@@ -318,6 +395,8 @@ const DEMO: State = {
   employees: SEED_EMPLOYEES,
   sales: [],
   purchases: SEED_PURCHASES,
+  salesReturns: [],
+  purchaseReturns: [],
   printer: DEFAULT_PRINTER,
   audit: [],
   held: [],
@@ -331,7 +410,7 @@ const DEMO: State = {
 
 const EMPTY: State = {
   medicines: [], customers: [], suppliers: [], employees: [], sales: [],
-  purchases: [], printer: DEFAULT_PRINTER, audit: [], held: [],
+  purchases: [], salesReturns: [], purchaseReturns: [], printer: DEFAULT_PRINTER, audit: [], held: [],
   financeEntries: [], attendance: [], salaryPayments: [],
   loans: [],
   gstProfile: DEFAULT_GST_PROFILE,
@@ -370,13 +449,22 @@ function load(): State {
       financeEntries: parsed.financeEntries ?? [],
       attendance: parsed.attendance ?? [],
       loans: parsed.loans ?? [],
+      salesReturns: parsed.salesReturns ?? [],
+      purchaseReturns: [], // Supabase is the primary and only persistent data source
       gstProfile: { ...DEFAULT_GST_PROFILE, ...(parsed.gstProfile ?? {}) },
       customCategories: {
         income: parsed.customCategories?.income ?? [],
         expense: parsed.customCategories?.expense ?? [],
       },
       salaryPayments: parsed.salaryPayments ?? [],
-      printer: { ...DEFAULT_PRINTER, ...(parsed.printer ?? {}) },
+      printer: {
+        ...DEFAULT_PRINTER,
+        ...(parsed.printer ?? {}),
+        labelSettings: {
+          ...DEFAULT_BARCODE_LABEL_SETTINGS,
+          ...(parsed.printer?.labelSettings ?? {}),
+        },
+      },
     };
   } catch {
     return structuredClone(base);
@@ -385,7 +473,9 @@ function load(): State {
 
 function persist() {
   if (typeof window === "undefined") return;
-  localStorage.setItem(storeKey(), JSON.stringify(state));
+  // Exclude purchaseReturns from localStorage: Supabase is the primary and only persistent source
+  const { purchaseReturns: _pr, ...rest } = state;
+  localStorage.setItem(storeKey(), JSON.stringify(rest));
 }
 function emit() { listeners.forEach((l) => l()); }
 
@@ -644,6 +734,36 @@ export async function syncAuditLogsFromSupabase(tenantId?: string): Promise<Audi
   return state.audit;
 }
 
+export async function syncSalesReturnsFromSupabase(tenantId?: string): Promise<SalesReturn[]> {
+  const tid = tenantId || getCurrentTenantId();
+  if (!tid) return state.salesReturns;
+  try {
+    const { returns, error } = await sb_fetchSalesReturns(tid);
+    if (!error && Array.isArray(returns)) {
+      setState((s) => { s.salesReturns = returns; });
+      return returns;
+    }
+  } catch (err) {
+    console.error("[store] syncSalesReturns error:", err);
+  }
+  return state.salesReturns;
+}
+
+export async function syncPurchaseReturnsFromSupabase(tenantId?: string): Promise<PurchaseReturn[]> {
+  const tid = tenantId || getCurrentTenantId();
+  if (!tid) return state.purchaseReturns;
+  try {
+    const { returns, error } = await sb_fetchPurchaseReturns(tid);
+    if (!error && Array.isArray(returns)) {
+      setState((s) => { s.purchaseReturns = returns; });
+      return returns;
+    }
+  } catch (err) {
+    console.error("[store] syncPurchaseReturns error:", err);
+  }
+  return state.purchaseReturns;
+}
+
 export function hydrate() {
   if (hydrated || typeof window === "undefined") return;
   state = load();
@@ -660,6 +780,8 @@ export function hydrate() {
   syncAttendanceFromSupabase().catch(() => {});
   syncGSTProfileFromSupabase().catch(() => {});
   syncAuditLogsFromSupabase().catch(() => {});
+  syncSalesReturnsFromSupabase().catch(() => {});
+  syncPurchaseReturnsFromSupabase().catch(() => {});
 }
 
 /** Re-read data after switching business (tenant). */
@@ -679,12 +801,31 @@ export function reloadStore() {
   syncAttendanceFromSupabase().catch(() => {});
   syncGSTProfileFromSupabase().catch(() => {});
   syncAuditLogsFromSupabase().catch(() => {});
+  syncSalesReturnsFromSupabase().catch(() => {});
+  syncPurchaseReturnsFromSupabase().catch(() => {});
 }
 function subscribe(cb: () => void) { listeners.add(cb); return () => listeners.delete(cb); }
 
-export function useStore<T>(selector: (s: State) => T): T {
+export interface UseStoreHook {
+  <T>(selector: (s: State) => T): T;
+  getState: <T = State>(selector?: (s: State) => T) => T;
+}
+
+function useStoreBase<T>(selector: (s: State) => T): T {
   useEffect(() => hydrate(), []);
   return useSyncExternalStore(subscribe, () => selector(state), () => selector(DEFAULT));
+}
+
+useStoreBase.getState = <T = State>(selector?: (s: State) => T): T => {
+  hydrate();
+  return selector ? selector(state) : (state as any);
+};
+
+export const useStore: UseStoreHook = useStoreBase;
+
+export function getStoreState(): State {
+  hydrate();
+  return state;
 }
 
 function setState(mut: (s: State) => void) {
@@ -834,11 +975,11 @@ export const actions = {
           profit,
           code,
           created_at: m.created_at || nowIso,
-          id: "M" + (Date.now() + i).toString().slice(-6),
+          id: "M" + Date.now().toString(36) + "-" + (i + 1) + "-" + Math.random().toString(36).slice(2, 6),
         };
-        s.medicines.unshift(item);
         createdList.push(item);
       });
+      s.medicines = [...createdList, ...s.medicines];
     });
     audit({ actor: "system", action: "medicine.add", target: `${list.length} products (bulk)` });
 
@@ -996,7 +1137,11 @@ export const actions = {
       s.purchases.unshift(rec);
       // Increase stock and update purchase rate (FEFO friendly: keeps batch expiry data intact per medicine)
       p.items.forEach((it) => {
-        const m = s.medicines.find((x) => x.name === it.name && x.batch === it.batch);
+        const m = s.medicines.find(
+          (x) =>
+            x.name.trim().toLowerCase() === it.name.trim().toLowerCase() &&
+            x.batch.trim().toLowerCase() === it.batch.trim().toLowerCase()
+        );
         if (m) {
           m.stock += it.qty;
           const patch: Partial<Medicine> = { stock: m.stock };
@@ -1027,10 +1172,20 @@ export const actions = {
     audit({ actor: actorLabel(actor), action: "purchase.add", target: p.invoiceNo, detail: `${p.supplier} · ₹${p.total}` });
 
     const { error } = await sb_insertPurchase(tid, rec);
-    for (const item of affectedMeds) {
-      sb_updateMedicine(tid, item.id, item.patch).catch((err) =>
-        console.error("[store] addPurchase stock/rate update failed:", err)
-      );
+    if (affectedMeds.length > 0) {
+      const BATCH_SIZE = 25;
+      (async () => {
+        for (let i = 0; i < affectedMeds.length; i += BATCH_SIZE) {
+          const batch = affectedMeds.slice(i, i + BATCH_SIZE);
+          await Promise.all(
+            batch.map((item) =>
+              sb_updateMedicine(tid, item.id, item.patch).catch((err) =>
+                console.error("[store] addPurchase stock/rate update failed:", err)
+              )
+            )
+          );
+        }
+      })();
     }
     return { purchase: rec, error };
   },
@@ -1127,6 +1282,251 @@ export const actions = {
     const { error } = await sb_deleteSale(tid, id);
     return { error };
   },
+
+  syncSalesReturns(tenantId?: string) {
+    return syncSalesReturnsFromSupabase(tenantId);
+  },
+
+  /**
+   * Create a sales return.
+   *
+   * - Accepts returnItems where each item has returnedQty in BASE UNITS.
+   * - Restores stock by exact base-unit count (not full strips).
+   * - Does NOT alter the original sale record.
+   */
+  async createSalesReturn(
+    payload: {
+      originalSaleId: string;
+      customerId: string | null;
+      customerName: string;
+      phone: string;
+      returnItems: {
+        medicineId: string;
+        medicineName: string;
+        batch: string;
+        expiry: string;
+        returnedQty: number;   // base units being returned
+        originalQty: number;   // original base units in sale line
+        unit: string;
+        rate: number;          // per-unit rate (unitMrp from sale)
+        gst: number;
+        returnAmount: number;
+      }[];
+      reason: string;
+    },
+    actor?: { id: string; name: string },
+  ): Promise<{ ret: SalesReturn; error: string | null }> {
+    const tid = getCurrentTenantId();
+    const now = new Date().toISOString();
+    const id = "SR" + Date.now().toString().slice(-8);
+    const returnNo = "RTN" + Date.now().toString().slice(-6);
+
+    const totalReturn = payload.returnItems.reduce((s, it) => s + it.returnAmount, 0);
+    const totalGst = payload.returnItems.reduce((s, it) => {
+      const taxable = it.returnAmount / (1 + it.gst / 100);
+      return s + (it.returnAmount - taxable);
+    }, 0);
+
+    const record: SalesReturn = {
+      id,
+      tenantId: tid,
+      returnNo,
+      originalSaleId: payload.originalSaleId,
+      customerId: payload.customerId,
+      customerName: payload.customerName,
+      phone: payload.phone ?? "",
+      items: payload.returnItems.map((it) => ({
+        medicineId: it.medicineId,
+        medicineName: it.medicineName,
+        batch: it.batch,
+        expiry: it.expiry,
+        returnedQty: it.returnedQty,
+        originalQty: it.originalQty,
+        unit: it.unit,
+        rate: it.rate,
+        gst: it.gst,
+        returnAmount: it.returnAmount,
+      })),
+      returnAmount: +totalReturn.toFixed(2),
+      gstAmount: +totalGst.toFixed(2),
+      reason: payload.reason,
+      returnDate: now,
+      status: "completed",
+      processedBy: actor?.id ?? "system",
+      processedByName: actor?.name ?? "system",
+      createdAt: now,
+    };
+
+    // 1. Optimistic state update
+    const restoredMeds: { id: string; stock: number }[] = [];
+    setState((s) => {
+      s.salesReturns.unshift(record);
+      // Restore stock: match by medicineId first, then name+batch, then name only
+      payload.returnItems.forEach((it) => {
+        const unitsToRestore = it.returnedQty; // exact base units only
+        let med = s.medicines.find((m) => m.id === it.medicineId && it.medicineId)
+          ?? s.medicines.find((m) => m.name === it.medicineName && m.batch === it.batch)
+          ?? s.medicines.find((m) => m.name === it.medicineName);
+        if (med) {
+          med.stock += unitsToRestore;
+          restoredMeds.push({ id: med.id, stock: med.stock });
+        }
+      });
+    });
+
+    audit({
+      actor: actorLabel(actor),
+      action: "sale.return",
+      module: "Billing",
+      target: returnNo,
+      detail: `Ref: ${payload.originalSaleId} · ₹${totalReturn.toFixed(2)} · ${payload.reason}`,
+    });
+
+    // 2. Persist to Supabase
+    const { error } = await sb_insertSalesReturn(tid, record);
+    // 3. Update medicine stock in Supabase
+    for (const item of restoredMeds) {
+      sb_updateMedicine(tid, item.id, { stock: item.stock }).catch((err) =>
+        console.error("[store] createSalesReturn stock restore failed:", err),
+      );
+    }
+    return { ret: record, error };
+  },
+
+  async deleteSalesReturn(id: string, actor?: { id: string; name: string }): Promise<{ error: string | null }> {
+    const tid = getCurrentTenantId();
+    // NOTE: Deleting a return does NOT re-deduct stock. Only use for data corrections.
+    setState((s) => { s.salesReturns = s.salesReturns.filter((x) => x.id !== id); });
+    audit({ actor: actorLabel(actor), action: "sale.return.delete", module: "Billing", target: id });
+    const { error } = await sb_deleteSalesReturn(tid, id);
+    return { error };
+  },
+
+  syncPurchaseReturns(tenantId?: string) {
+    return syncPurchaseReturnsFromSupabase(tenantId);
+  },
+
+  /**
+   * Create a purchase return to supplier.
+   *
+   * - Deducts returned stock from medicines (since returned items leave the pharmacy).
+   * - Does NOT alter the original purchase record.
+   */
+  async createPurchaseReturn(
+    payload: {
+      originalPurchaseId: string;
+      supplierId: string | null;
+      supplierName: string;
+      returnItems: {
+        medicineId: string;
+        medicineName: string;
+        batch: string;
+        expiry: string;
+        returnedQty: number; // units being returned (base units)
+        originalQty: number;
+        purchaseRate: number;
+        gst: number;
+        returnAmount: number;
+      }[];
+      reason: string;
+    },
+    actor?: { id: string; name: string },
+  ): Promise<{ ret: PurchaseReturn; error: string | null }> {
+    const tid = getCurrentTenantId();
+    if (!tid) return { ret: {} as any, error: "Tenant ID required" };
+
+    const now = new Date().toISOString();
+    const id = "PR" + Date.now().toString().slice(-8);
+    const returnNo = "PRTN" + Date.now().toString().slice(-6);
+
+    const totalReturn = payload.returnItems.reduce((s, it) => s + it.returnAmount, 0);
+    const totalGst = payload.returnItems.reduce((s, it) => {
+      const taxable = it.returnAmount / (1 + it.gst / 100);
+      return s + (it.returnAmount - taxable);
+    }, 0);
+
+    const record: PurchaseReturn = {
+      id,
+      tenantId: tid,
+      returnNo,
+      originalPurchaseId: payload.originalPurchaseId,
+      supplierId: payload.supplierId,
+      supplierName: payload.supplierName,
+      items: payload.returnItems.map((it) => ({
+        medicineId: it.medicineId,
+        medicineName: it.medicineName,
+        batch: it.batch,
+        expiry: it.expiry,
+        returnedQty: it.returnedQty,
+        originalQty: it.originalQty,
+        purchaseRate: it.purchaseRate,
+        gst: it.gst,
+        returnAmount: it.returnAmount,
+      })),
+      returnAmount: +totalReturn.toFixed(2),
+      gstAmount: +totalGst.toFixed(2),
+      reason: payload.reason,
+      returnDate: now,
+      status: "completed",
+      processedBy: actor?.id ?? "system",
+      processedByName: actor?.name ?? "system",
+      createdAt: now,
+    };
+
+    // 1. SAVE TO SUPABASE FIRST — NO LOCAL FALLBACK OR UNVERIFIED STATE
+    const { error: insertError } = await sb_insertPurchaseReturn(tid, record);
+    if (insertError) {
+      // Do NOT modify local purchaseReturns or stock if Supabase fails
+      return { ret: record, error: insertError };
+    }
+
+    // 2. ONLY AFTER SUPABASE SUCCEEDS: Update stock in Supabase and local store
+    const affectedMeds: { id: string; stock: number }[] = [];
+    setState((s) => {
+      payload.returnItems.forEach((it) => {
+        let med = s.medicines.find((m) => m.id === it.medicineId && it.medicineId)
+          ?? s.medicines.find((m) => m.name === it.medicineName && m.batch === it.batch)
+          ?? s.medicines.find((m) => m.name === it.medicineName);
+        if (med) {
+          med.stock = Math.max(0, med.stock - it.returnedQty);
+          affectedMeds.push({ id: med.id, stock: med.stock });
+        }
+      });
+    });
+
+    for (const item of affectedMeds) {
+      sb_updateMedicine(tid, item.id, { stock: item.stock }).catch((err) =>
+        console.error("[store] createPurchaseReturn stock deduction failed:", err),
+      );
+    }
+
+    audit({
+      actor: actorLabel(actor),
+      action: "purchase.return",
+      module: "Purchase",
+      target: returnNo,
+      detail: `Supplier: ${payload.supplierName} · Ref: ${payload.originalPurchaseId} · ₹${totalReturn.toFixed(2)} · ${payload.reason}`,
+    });
+
+    // 3. Refresh Purchase Returns directly from Supabase
+    await syncPurchaseReturnsFromSupabase(tid);
+
+    return { ret: record, error: null };
+  },
+
+  async deletePurchaseReturn(id: string, actor?: { id: string; name: string }): Promise<{ error: string | null }> {
+    const tid = getCurrentTenantId();
+    // 1. Delete from Supabase first
+    const { error } = await sb_deletePurchaseReturn(tid, id);
+    if (!error) {
+      audit({ actor: actorLabel(actor), action: "purchase.return.delete", module: "Purchase", target: id });
+      // 2. Refetch cleanly from Supabase
+      await syncPurchaseReturnsFromSupabase(tid);
+    }
+    return { error };
+  },
+
+
 
   holdBill(bill: Omit<HeldBill, "id" | "at">, actor?: { id: string; name: string }): HeldBill {
     const rec: HeldBill = {
