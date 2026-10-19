@@ -182,9 +182,10 @@ export function buildSingleLabelHtml(
   m: Medicine,
   s: BarcodeLabelSettings,
   defaultStoreName: string,
+  shopId = "T001",
 ): string {
   const store = (s.customStoreName.trim() || defaultStoreName || "MEDICAL STORE").toUpperCase();
-  const code = m.code || m.id || "00000";
+  const medId = m.code || m.id || "MED0001";
   const bHeight = s.barcodeHeightMm || 8;
 
   // Typography scaling
@@ -194,22 +195,27 @@ export function buildSingleLabelHtml(
   // Barcode / QR rendering
   let codeGraphic = "";
   if (s.barcodeType === "qr") {
-    // URL-encoded QR for standard phone / scanner readability
-    const qrData = encodeURIComponent(
-      `MED:${m.name}|B:${m.batch || ""}|EXP:${m.expiry || ""}|MRP:${m.mrp}`
-    );
-    const qrSrc = `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${qrData}`;
-    codeGraphic = `<div class="qr-wrap"><img src="${qrSrc}" alt="QR" class="qr-img" /></div>`;
+    // Secure QR payload containing shop ID, medicine ID, and exact batch
+    const lookupPath = `/medicine-lookup?shop=${encodeURIComponent(shopId)}&med=${encodeURIComponent(medId)}&batch=${encodeURIComponent(m.batch || "")}`;
+    const qrSrc = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&margin=2&qzone=2&data=${encodeURIComponent(lookupPath)}`;
+    codeGraphic = `
+      <div class="qr-block">
+        <div class="qr-wrap">
+          <img src="${qrSrc}" alt="QR" class="qr-img" />
+        </div>
+        ${s.showCodeText ? `<div class="lbl-med-id font-bold">${medId}</div>` : ""}
+      </div>
+    `;
   } else {
     // Crisp Code 128 SVG
-    const rects = code128Rects(code, 240, 60);
+    const rects = code128Rects(medId, 240, 60);
     codeGraphic = `
       <div class="bc-wrap" style="height:${bHeight}mm">
         <svg viewBox="0 0 240 60" width="100%" height="100%" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
           ${rects}
         </svg>
       </div>
-      ${s.showCodeText ? `<div class="bc-text">${code}</div>` : ""}
+      ${s.showCodeText ? `<div class="bc-text">${medId}</div>` : ""}
     `;
   }
 
@@ -242,13 +248,15 @@ export function printBarcodeLabels(
   items: { medicine: Medicine; qty: number }[],
   settings: BarcodeLabelSettings,
   defaultStoreName: string,
+  shopId = "T001",
 ): { error?: string } {
-  if (items.length === 0) return { error: "No items selected to print" };
+  const activeItems = items.filter((it) => it.qty > 0);
+  if (activeItems.length === 0) return { error: "No items selected to print (all quantities are 0)" };
 
-  const labelsHtml = items
+  const labelsHtml = activeItems
     .flatMap(({ medicine, qty }) =>
-      Array.from({ length: Math.max(1, qty) }).map(() =>
-        buildSingleLabelHtml(medicine, settings, defaultStoreName)
+      Array.from({ length: qty }).map(() =>
+        buildSingleLabelHtml(medicine, settings, defaultStoreName, shopId)
       )
     )
     .join("\n");
@@ -347,15 +355,34 @@ export function printBarcodeLabels(
       height: 100%;
       display: block;
     }
+    .qr-block {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5mm;
+    }
     .qr-wrap {
       display: flex;
       align-items: center;
       justify-content: center;
+      background: #ffffff;
+      padding: 0.8mm;
+      border-radius: 1mm;
+      box-shadow: 0 0 0 0.5px rgba(0,0,0,0.05);
     }
     .qr-img {
-      width: 15mm;
-      height: 15mm;
+      width: 14mm;
+      height: 14mm;
       display: block;
+      image-rendering: pixelated;
+    }
+    .lbl-med-id {
+      font-size: 6.5pt;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      letter-spacing: 0.5px;
+      color: #000;
+      line-height: 1;
     }
     .lbl-footer {
       display: flex;

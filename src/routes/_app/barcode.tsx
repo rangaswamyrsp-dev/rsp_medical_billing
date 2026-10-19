@@ -17,6 +17,7 @@ import {
   Square, Eye, RotateCcw, Sparkles, QrCode, Layers,
 } from "lucide-react";
 import { actions, useStore, type Medicine } from "@/lib/store";
+import { useTenant } from "@/lib/tenant";
 import { code128b, code128Rects } from "@/lib/code128";
 import {
   LABEL_PRESETS,
@@ -29,6 +30,7 @@ import {
 } from "@/lib/barcode-settings";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { parsePackInfo } from "@/lib/medicine-units";
 
 export const Route = createFileRoute("/_app/barcode")({
   head: () => ({
@@ -60,6 +62,7 @@ function BarcodeSVG({ code, height = 44 }: { code: string; height?: number }) {
 function BarcodePage() {
   const meds = useStore((s) => s.medicines);
   const printer = useStore((s) => s.printer);
+  const tenant = useTenant();
 
   // Settings state (initialized from store printer.labelSettings)
   const [settings, setSettings] = useState<BarcodeLabelSettings>(() => {
@@ -151,19 +154,23 @@ function BarcodePage() {
     setSelectedIds([]);
   };
 
-  // Set copies equal to each medicine's available stock
+  // Set copies equal to each medicine's pack quantity (ignoring extra loose units)
   const matchCurrentStock = () => {
     if (selectedIds.length === 0) {
-      toast.info("Select medicines first to match stock count");
+      toast.info("Select medicines first to match pack quantity");
       return;
     }
     const newQtys: Record<string, number> = { ...itemQuantities };
     selectedIds.forEach((id) => {
       const m = meds.find((x) => x.id === id);
-      newQtys[id] = Math.max(1, m?.stock ?? 1);
+      if (!m) return;
+      const pInfo = parsePackInfo(m);
+      const stockUnits = Math.max(0, Number(m.stock) || 0);
+      const packs = pInfo.packSize > 1 ? Math.floor(stockUnits / pInfo.packSize) : stockUnits;
+      newQtys[id] = packs;
     });
     setItemQuantities(newQtys);
-    toast.success(`Updated label copies to match current inventory stock`);
+    toast.success("Updated label copies to match pack quantities (excluding extra loose units)");
   };
 
   // Set uniform copies for all selected
@@ -187,14 +194,20 @@ function BarcodePage() {
         const medicine = meds.find((m) => m.id === id);
         if (!medicine) return null;
         const qty = itemQuantities[id] ?? defaultCopies;
+        if (qty <= 0) return null;
         return { medicine, qty };
       })
       .filter(Boolean) as { medicine: Medicine; qty: number }[];
 
+    if (itemsToPrint.length === 0) {
+      return toast.error("Selected medicines have 0 pack copies to print");
+    }
+
     const result = printBarcodeLabels(
       itemsToPrint,
       settings,
-      printer.storeName || "RSP Medical"
+      printer.storeName || "RSP Medical",
+      tenant.id || "T001"
     );
 
     if (result.error) {
@@ -257,7 +270,7 @@ function BarcodePage() {
             <span>Print Labels</span>
             {selectedIds.length > 0 && (
               <Badge variant="outline" className="bg-primary-foreground/20 text-primary-foreground border-transparent text-[11px] ml-1">
-                {selectedIds.reduce((sum, id) => sum + (itemQuantities[id] ?? defaultCopies), 0)}
+                {selectedIds.reduce((sum, id) => sum + Math.max(0, itemQuantities[id] ?? defaultCopies), 0)}
               </Badge>
             )}
           </Button>
@@ -355,9 +368,9 @@ function BarcodePage() {
               onClick={matchCurrentStock}
               disabled={selectedIds.length === 0}
               className="h-9 text-xs gap-1"
-              title="Set print copies to match available inventory stock"
+              title="Set print copies to match pack quantity (excluding extra loose units)"
             >
-              <Layers className="h-3.5 w-3.5" /> Match Stock
+              <Layers className="h-3.5 w-3.5" /> Match Qty (Packs)
             </Button>
           </div>
         </div>
@@ -370,7 +383,7 @@ function BarcodePage() {
           <div>
             Total labels to print:{" "}
             <strong className="text-foreground font-semibold">
-              {selectedIds.reduce((sum, id) => sum + (itemQuantities[id] ?? defaultCopies), 0)}
+              {selectedIds.reduce((sum, id) => sum + Math.max(0, itemQuantities[id] ?? defaultCopies), 0)}
             </strong>
           </div>
         </div>
@@ -388,6 +401,10 @@ function BarcodePage() {
             const active = selectedIds.includes(m.id);
             const code = m.code || m.id;
             const currentQty = itemQuantities[m.id] ?? defaultCopies;
+            const pInfo = parsePackInfo(m);
+            const stockUnits = Math.max(0, Number(m.stock) || 0);
+            const packs = pInfo.packSize > 1 ? Math.floor(stockUnits / pInfo.packSize) : stockUnits;
+            const extra = pInfo.packSize > 1 ? stockUnits % pInfo.packSize : 0;
 
             return (
               <Card
@@ -449,7 +466,12 @@ function BarcodePage() {
 
                   <div className="flex items-center justify-between text-[10px] text-muted-foreground">
                     <span>{m.batch ? `B:${m.batch}` : "—"}</span>
-                    <span>Stock: <strong className="text-foreground">{m.stock ?? 0}</strong></span>
+                    <span>
+                      Qty: <strong className="text-foreground">{packs}</strong>
+                      {extra > 0 && (
+                        <span className="text-[9px] text-emerald-600 font-bold ml-0.5">+{extra}</span>
+                      )}
+                    </span>
                   </div>
 
                   {/* Quantity Per Item */}
@@ -458,11 +480,11 @@ function BarcodePage() {
                     <div className="flex items-center gap-1">
                       <Input
                         type="number"
-                        min={1}
+                        min={0}
                         value={currentQty}
                         onClick={(e) => e.stopPropagation()}
                         onChange={(e) => {
-                          const v = Math.max(1, parseInt(e.target.value, 10) || 1);
+                          const v = Math.max(0, parseInt(e.target.value, 10) || 0);
                           setItemQuantities((prev) => ({ ...prev, [m.id]: v }));
                           if (!active) {
                             setSelectedIds((prev) => [...prev, m.id]);

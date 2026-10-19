@@ -135,7 +135,7 @@ function SettingsPage() {
       </div>
 
       {/* ── Google Drive & Cloud Backup Overview ── */}
-      <Card className="p-5 space-y-3">
+      {/* <Card className="p-5 space-y-3">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-2.5">
             <div className="h-9 w-9 rounded-lg bg-primary/10 text-primary grid place-items-center">
@@ -165,10 +165,10 @@ function SettingsPage() {
             </Link>
           </Button>
         </div>
-      </Card>
+      </Card> */}
 
       {/* ── Secure AI Medicine Image Extraction ── */}
-      <Card className="p-5 space-y-3">
+      {/* <Card className="p-5 space-y-3">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-2.5">
             <div className="h-9 w-9 rounded-lg bg-emerald-500/10 text-emerald-600 grid place-items-center">
@@ -199,7 +199,7 @@ function SettingsPage() {
             </div>
           </div>
         </div>
-      </Card>
+      </Card> */}
 
       {/* ── Thermal Printer Settings ── */}
       <Card className="p-5 space-y-4">
@@ -213,6 +213,7 @@ function SettingsPage() {
             <Select value={p.paperSize} onValueChange={(v) => update({ paperSize: v })}>
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
+                <SelectItem value="50mm">50mm thermal</SelectItem>
                 <SelectItem value="58mm">58mm thermal</SelectItem>
                 <SelectItem value="80mm">80mm thermal</SelectItem>
                 <SelectItem value="A4">A4 paper</SelectItem>

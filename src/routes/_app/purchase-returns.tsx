@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,8 +12,11 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
 import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
+import {
   Search, RefreshCcw, RotateCcw, ChevronDown, ChevronUp, Trash2, AlertCircle,
-  Truck, ArrowDownLeft, FileText, CheckCircle2,
+  Truck, ArrowDownLeft, CheckCircle2,
 } from "lucide-react";
 import { actions, useStore } from "@/lib/store";
 import type { Purchase, PurchaseReturn } from "@/lib/store";
@@ -34,6 +37,8 @@ type ReturnItemState = {
   batch: string;
   expiry: string;
   originalQty: number; // qty from purchase
+  alreadyReturnedQty: number; // qty already returned previously
+  returnableQty: number; // originalQty - alreadyReturnedQty
   currentStock: number; // stock currently on hand
   returnQty: number;
   purchaseRate: number;
@@ -59,61 +64,101 @@ function PurchaseReturnsPage() {
   const suppliers = useStore((s) => s.suppliers);
   const [me, setMe] = useState<ReturnType<typeof getUser>>(null);
 
-  // Filter / Search in history
-  const [historyQuery, setHistoryQuery] = useState("");
+  // Search & Filter State for Return History
+  const [historySearch, setHistorySearch] = useState("");
+  const [historySupplierFilter, setHistorySupplierFilter] = useState("all");
+  const [historyDateFilter, setHistoryDateFilter] = useState("");
   const [expandedReturn, setExpandedReturn] = useState<string | null>(null);
 
   // Create Return Dialog state
   const [createOpen, setCreateOpen] = useState(false);
-  const [purchaseSearch, setPurchaseSearch] = useState("");
+  const [selectedSupplierId, setSelectedSupplierId] = useState("");
+  const [invoiceSearchQuery, setInvoiceSearchQuery] = useState("");
   const [selectedPurchase, setSelectedPurchase] = useState<Purchase | null>(null);
   const [returnItems, setReturnItems] = useState<ReturnItemState[]>([]);
   const [reason, setReason] = useState("");
   const [saving, setSaving] = useState(false);
-
-  // Detail / Print Modal state
-  const [viewReturn, setViewReturn] = useState<PurchaseReturn | null>(null);
 
   useEffect(() => {
     setMe(getUser());
     actions.syncPurchases();
     actions.syncPurchaseReturns();
     actions.syncMedicines();
+    actions.syncSuppliers();
   }, []);
 
-  const canCreate = me ? CAN[me.role].purchase : true;
+  const canCreate = me ? (CAN[me.role]?.purchase ?? true) : true;
 
-  // ── Search Purchases for Return ──────────────────────────────────────────────
-  const matchedPurchases = useMemo(() => {
-    const q = purchaseSearch.toLowerCase().trim();
-    if (!q) return [];
-    return purchases
-      .filter((p) =>
+  // Selected supplier object
+  const activeSupplier = useMemo(() => {
+    if (!selectedSupplierId) return null;
+    return (
+      suppliers.find((s) => s.id === selectedSupplierId || s.name === selectedSupplierId) || null
+    );
+  }, [suppliers, selectedSupplierId]);
+
+  // Invoices filtered STRICTLY by selected supplier
+  const supplierInvoices = useMemo(() => {
+    if (!selectedSupplierId) return [];
+    const supName = activeSupplier ? activeSupplier.name.toLowerCase().trim() : selectedSupplierId.toLowerCase().trim();
+
+    return purchases.filter((p) => {
+      const matchSup =
+        (p.supplierId && p.supplierId === selectedSupplierId) ||
+        (p.supplier && p.supplier.toLowerCase().trim() === supName);
+      if (!matchSup) return false;
+
+      // Also filter by invoice search query if provided
+      const q = invoiceSearchQuery.toLowerCase().trim();
+      if (!q) return true;
+      return (
         (p.invoiceNo && p.invoiceNo.toLowerCase().includes(q)) ||
-        (p.supplier && p.supplier.toLowerCase().includes(q)) ||
-        p.id.toLowerCase().includes(q)
-      )
-      .slice(0, 8);
-  }, [purchases, purchaseSearch]);
+        (p.id && p.id.toLowerCase().includes(q))
+      );
+    });
+  }, [purchases, selectedSupplierId, activeSupplier, invoiceSearchQuery]);
 
-  function selectPurchase(p: Purchase) {
+  // Select an invoice from the supplier's list
+  function handleSelectPurchase(p: Purchase) {
     setSelectedPurchase(p);
-    setPurchaseSearch(`${p.invoiceNo || p.id} (${p.supplier})`);
 
-    // Match each purchase item with current medicine stock
+    // Calculate lines with already returned qty tracked from existing purchaseReturns
     const lines: ReturnItemState[] = (p.items || []).map((it) => {
-      const med = medicines.find(
-        (m) =>
-          m.name.toLowerCase() === it.name.toLowerCase() &&
-          (!it.batch || m.batch.toLowerCase() === it.batch.toLowerCase())
-      ) || medicines.find((m) => m.name.toLowerCase() === it.name.toLowerCase());
+      const med =
+        medicines.find(
+          (m) =>
+            m.name.toLowerCase() === it.name.toLowerCase() &&
+            (!it.batch || m.batch.toLowerCase() === it.batch.toLowerCase())
+        ) || medicines.find((m) => m.name.toLowerCase() === it.name.toLowerCase());
+
+      const origQty = Number(it.qty) || 0;
+
+      // Sum units of this medicine already returned from this invoice
+      const alreadyReturned = purchaseReturns
+        .filter(
+          (pr) =>
+            pr.originalPurchaseId === p.invoiceNo ||
+            pr.originalPurchaseId === p.id
+        )
+        .flatMap((pr) => pr.items || [])
+        .filter(
+          (retIt) =>
+            (med && retIt.medicineId === med.id) ||
+            (retIt.medicineName.toLowerCase() === it.name.toLowerCase() &&
+              (!it.batch || retIt.batch === it.batch))
+        )
+        .reduce((sum, retIt) => sum + (Number(retIt.returnedQty) || 0), 0);
+
+      const returnable = Math.max(0, origQty - alreadyReturned);
 
       return {
         medicineId: med?.id || "",
         medicineName: it.name,
         batch: it.batch || med?.batch || "",
-        expiry: med?.expiry || "",
-        originalQty: Number(it.qty) || 0,
+        expiry: it.expiry || med?.expiry || "",
+        originalQty: origQty,
+        alreadyReturnedQty: alreadyReturned,
+        returnableQty: returnable,
         currentStock: Number(med?.stock) || 0,
         returnQty: 0,
         purchaseRate: Number(it.rate) || 0,
@@ -131,10 +176,11 @@ function PurchaseReturnsPage() {
       prev.map((item, i) => {
         if (i !== index) return item;
         const nextSel = !item.selected;
+        const maxCanReturn = Math.min(item.returnableQty, item.currentStock);
         return {
           ...item,
           selected: nextSel,
-          returnQty: nextSel && item.returnQty === 0 ? Math.min(item.originalQty, Math.max(1, item.currentStock)) : item.returnQty,
+          returnQty: nextSel && item.returnQty === 0 ? Math.min(1, maxCanReturn) : item.returnQty,
         };
       })
     );
@@ -144,7 +190,8 @@ function PurchaseReturnsPage() {
     setReturnItems((prev) =>
       prev.map((item, i) => {
         if (i !== index) return item;
-        const clamped = Math.max(0, val);
+        const maxCanReturn = Math.min(item.returnableQty, item.currentStock);
+        const clamped = Math.max(0, Math.min(val, maxCanReturn));
         return {
           ...item,
           returnQty: clamped,
@@ -168,13 +215,18 @@ function PurchaseReturnsPage() {
 
   // ── Confirm Return Action ──────────────────────────────────────────────────
   async function handleConfirmReturn() {
-    if (!selectedPurchase) return toast.error("Please select an original purchase");
+    if (!selectedPurchase) return toast.error("Please select an original invoice");
     if (activeReturns.items.length === 0) return toast.error("Select at least one item to return");
     if (!reason.trim()) return toast.error("Please provide a return reason");
 
-    // Stock check validation
+    // Validation: return quantity must never exceed eligible purchased / returnable quantity
     for (const it of activeReturns.items) {
-      if (it.currentStock < it.returnQty) {
+      if (it.returnQty > it.returnableQty) {
+        return toast.error(
+          `Return quantity for ${it.medicineName} (${it.returnQty}) cannot exceed remaining returnable quantity (${it.returnableQty})!`
+        );
+      }
+      if (it.returnQty > it.currentStock) {
         return toast.error(
           `Cannot return ${it.returnQty} units of ${it.medicineName}. Only ${it.currentStock} in stock!`
         );
@@ -204,18 +256,26 @@ function PurchaseReturnsPage() {
         me ? { id: me.id, name: me.name } : undefined
       );
 
-      if (res.error) {
-        toast.error(`Purchase return could not be saved to Supabase: ${res.error}`);
+      if (res.error && !res.permissionDenied) {
+        toast.error(`Purchase return could not be saved: ${res.error}`);
         return;
       }
 
-      toast.success(`Purchase Return ${res.ret.returnNo} saved to Supabase successfully!`);
+      if (res.permissionDenied) {
+        toast.warning(
+          `Purchase Return ${res.ret.returnNo} recorded & stock deducted! (Notice: Run Supabase SQL grant for table purchase_returns)`,
+          { duration: 8000 }
+        );
+      } else {
+        toast.success(`Purchase Return ${res.ret.returnNo} processed! Stock updated ✓`);
+      }
+
       setCreateOpen(false);
+      setSelectedSupplierId("");
       setSelectedPurchase(null);
-      setPurchaseSearch("");
+      setInvoiceSearchQuery("");
       setReturnItems([]);
       setReason("");
-      actions.syncPurchaseReturns();
       actions.syncMedicines();
     } catch (err: any) {
       toast.error(err?.message || "Failed to process return");
@@ -226,16 +286,40 @@ function PurchaseReturnsPage() {
 
   // ── History Filter ─────────────────────────────────────────────────────────
   const filteredHistory = useMemo(() => {
-    const q = historyQuery.toLowerCase().trim();
-    if (!q) return purchaseReturns;
-    return purchaseReturns.filter(
-      (r) =>
-        r.returnNo.toLowerCase().includes(q) ||
-        r.supplierName.toLowerCase().includes(q) ||
-        r.originalPurchaseId.toLowerCase().includes(q) ||
-        r.reason.toLowerCase().includes(q)
-    );
-  }, [purchaseReturns, historyQuery]);
+    const q = historySearch.toLowerCase().trim();
+    return purchaseReturns.filter((r) => {
+      // Supplier filter
+      if (historySupplierFilter !== "all") {
+        const matchesSupplier =
+          r.supplierId === historySupplierFilter ||
+          (r.supplierName &&
+            r.supplierName.toLowerCase().trim() === historySupplierFilter.toLowerCase().trim());
+        if (!matchesSupplier) return false;
+      }
+
+      // Date filter
+      if (historyDateFilter && r.returnDate) {
+        if (!r.returnDate.startsWith(historyDateFilter)) return false;
+      }
+
+      // Search: Invoice, Supplier, Medicine Name, Batch, Return #, Reason
+      if (!q) return true;
+
+      const basicMatch =
+        (r.returnNo && r.returnNo.toLowerCase().includes(q)) ||
+        (r.supplierName && r.supplierName.toLowerCase().includes(q)) ||
+        (r.originalPurchaseId && r.originalPurchaseId.toLowerCase().includes(q)) ||
+        (r.reason && r.reason.toLowerCase().includes(q));
+
+      const itemMatch = (r.items || []).some(
+        (it) =>
+          (it.medicineName && it.medicineName.toLowerCase().includes(q)) ||
+          (it.batch && it.batch.toLowerCase().includes(q))
+      );
+
+      return basicMatch || itemMatch;
+    });
+  }, [purchaseReturns, historySearch, historySupplierFilter, historyDateFilter]);
 
   // KPIs
   const totalReturnValue = purchaseReturns.reduce((s, r) => s + (Number(r.returnAmount) || 0), 0);
@@ -269,12 +353,13 @@ function PurchaseReturnsPage() {
               size="sm"
               onClick={() => {
                 setCreateOpen(true);
+                setSelectedSupplierId("");
                 setSelectedPurchase(null);
-                setPurchaseSearch("");
+                setInvoiceSearchQuery("");
                 setReturnItems([]);
                 setReason("");
               }}
-              className="gap-1.5 shadow-sm"
+              className="gap-1.5 shadow-sm bg-primary text-primary-foreground"
             >
               <RotateCcw className="h-4 w-4" /> New Purchase Return
             </Button>
@@ -325,15 +410,56 @@ function PurchaseReturnsPage() {
       {/* ── Search Bar & History Table ───────────────────────────────────────── */}
       <Card className="overflow-hidden border shadow-sm">
         <div className="p-3.5 bg-muted/40 border-b flex items-center justify-between flex-wrap gap-3">
-          <div className="relative w-full max-w-sm">
-            <Search className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              placeholder="Search by Return #, Supplier, Invoice Ref, Reason…"
-              value={historyQuery}
-              onChange={(e) => setHistoryQuery(e.target.value)}
-              className="pl-9 h-9 text-sm bg-background"
-            />
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 w-full max-w-2xl">
+            {/* Search Query */}
+            <div className="relative">
+              <Search className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                placeholder="Search Return #, Supplier, Invoice, Medicine, Batch…"
+                value={historySearch}
+                onChange={(e) => setHistorySearch(e.target.value)}
+                className="pl-9 h-9 text-xs bg-background"
+              />
+            </div>
+
+            {/* Supplier Filter */}
+            <div>
+              <Select value={historySupplierFilter} onValueChange={setHistorySupplierFilter}>
+                <SelectTrigger className="h-9 text-xs bg-background">
+                  <SelectValue placeholder="All Suppliers" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Suppliers</SelectItem>
+                  {suppliers.map((s) => (
+                    <SelectItem key={s.id} value={s.id || s.name}>
+                      {s.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* Date Filter */}
+            <div className="flex items-center gap-1.5">
+              <Input
+                type="date"
+                value={historyDateFilter}
+                onChange={(e) => setHistoryDateFilter(e.target.value)}
+                className="h-9 text-xs bg-background"
+              />
+              {historyDateFilter && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setHistoryDateFilter("")}
+                  className="h-9 px-2 text-xs text-muted-foreground"
+                >
+                  Clear
+                </Button>
+              )}
+            </div>
           </div>
+
           <div className="text-xs text-muted-foreground">
             Showing {filteredHistory.length} of {purchaseReturns.length} return records
           </div>
@@ -346,7 +472,7 @@ function PurchaseReturnsPage() {
                 <TableHead className="w-28">Return #</TableHead>
                 <TableHead className="w-28">Date</TableHead>
                 <TableHead>Supplier</TableHead>
-                <TableHead>Original Ref</TableHead>
+                <TableHead>Original Invoice</TableHead>
                 <TableHead className="text-center">Items</TableHead>
                 <TableHead className="text-right">Return Amt</TableHead>
                 <TableHead className="text-right">GST</TableHead>
@@ -359,7 +485,7 @@ function PurchaseReturnsPage() {
                 <TableRow>
                   <TableCell colSpan={9} className="text-center py-12 text-muted-foreground">
                     <Truck className="h-8 w-8 mx-auto mb-2 opacity-30" />
-                    No supplier purchase returns found.
+                    No supplier purchase returns found matching filters.
                   </TableCell>
                 </TableRow>
               ) : (
@@ -445,8 +571,8 @@ function PurchaseReturnsPage() {
                                   <TableRow className="text-[11px] text-muted-foreground">
                                     <TableHead>Medicine Name</TableHead>
                                     <TableHead>Batch</TableHead>
-                                    <TableHead className="text-center">Returned Qty</TableHead>
-                                    <TableHead className="text-right">Purchase Rate</TableHead>
+                                    <TableHead className="text-center">Returned Qty (Units)</TableHead>
+                                    <TableHead className="text-right">P. Rate</TableHead>
                                     <TableHead className="text-center">GST %</TableHead>
                                     <TableHead className="text-right">Total Debit</TableHead>
                                   </TableRow>
@@ -481,70 +607,119 @@ function PurchaseReturnsPage() {
 
       {/* ── Create Purchase Return Dialog ───────────────────────────────────── */}
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-4xl max-h-[92vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-lg">
               <RotateCcw className="h-5 w-5 text-primary" /> Create Supplier Purchase Return
             </DialogTitle>
             <DialogDescription>
-              Select the original purchase invoice, specify the quantities to return, and deduct stock.
+              Select supplier first, pick their original invoice, enter return quantities (up to available
+              limit), and finalize debit.
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-4 pt-2">
-            {/* Step 1: Select Purchase */}
+            {/* Step 1: Select Supplier First (Section 18 requirement) */}
             <div className="space-y-1.5">
-              <Label className="text-xs font-semibold">Step 1 — Find Original Purchase Invoice</Label>
-              <div className="relative">
-                <Search className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  placeholder="Search by invoice no or supplier name..."
-                  value={purchaseSearch}
-                  onChange={(e) => {
-                    setPurchaseSearch(e.target.value);
-                    if (selectedPurchase) setSelectedPurchase(null);
-                  }}
-                  className="pl-9"
-                />
-              </div>
-
-              {/* Suggestions */}
-              {!selectedPurchase && matchedPurchases.length > 0 && (
-                <div className="border rounded-md mt-1 divide-y max-h-48 overflow-y-auto bg-popover shadow-sm">
-                  {matchedPurchases.map((p) => (
-                    <button
-                      key={p.id}
-                      type="button"
-                      onClick={() => selectPurchase(p)}
-                      className="w-full text-left p-2.5 hover:bg-muted/60 transition-colors flex items-center justify-between text-xs"
-                    >
-                      <div>
-                        <div className="font-semibold text-foreground">
-                          {p.invoiceNo ? `Inv #${p.invoiceNo}` : p.id}
-                        </div>
-                        <div className="text-muted-foreground mt-0.5">
-                          Supplier: {p.supplier} · Date: {p.date}
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <div className="font-semibold text-foreground">₹{p.total}</div>
-                        <div className="text-muted-foreground">{p.items?.length || 0} items</div>
-                      </div>
-                    </button>
+              <Label className="text-xs font-semibold">
+                Step 1 — Select Supplier <span className="text-destructive">*</span>
+              </Label>
+              <Select
+                value={selectedSupplierId}
+                onValueChange={(val) => {
+                  setSelectedSupplierId(val);
+                  setSelectedPurchase(null);
+                  setInvoiceSearchQuery("");
+                  setReturnItems([]);
+                }}
+              >
+                <SelectTrigger className="text-xs">
+                  <SelectValue placeholder="Choose Supplier to begin return..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {suppliers.map((s) => (
+                    <SelectItem key={s.id} value={s.id || s.name}>
+                      {s.name}
+                    </SelectItem>
                   ))}
-                </div>
-              )}
+                </SelectContent>
+              </Select>
             </div>
 
-            {/* Step 2: Select Items */}
+            {/* Step 2: Search and Select Invoice belonging STRICTLY to Selected Supplier */}
+            {selectedSupplierId && (
+              <div className="space-y-1.5 p-3 rounded-lg border bg-muted/20">
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs font-semibold">
+                    Step 2 — Select Supplier Invoice <span className="text-destructive">*</span>
+                  </Label>
+                  <span className="text-xs text-muted-foreground">
+                    Invoices found: <strong>{supplierInvoices.length}</strong>
+                  </span>
+                </div>
+
+                <div className="relative">
+                  <Search className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    placeholder="Search invoice number from this supplier..."
+                    value={invoiceSearchQuery}
+                    onChange={(e) => setInvoiceSearchQuery(e.target.value)}
+                    className="pl-9 h-8 text-xs bg-background"
+                  />
+                </div>
+
+                {/* Invoices List for Selected Supplier */}
+                <div className="border rounded-md mt-1 divide-y max-h-40 overflow-y-auto bg-background">
+                  {supplierInvoices.length === 0 ? (
+                    <div className="p-3 text-center text-xs text-muted-foreground">
+                      No invoices found for this supplier.
+                    </div>
+                  ) : (
+                    supplierInvoices.map((p) => {
+                      const isSelected = selectedPurchase?.id === p.id;
+                      return (
+                        <button
+                          key={p.id}
+                          type="button"
+                          onClick={() => handleSelectPurchase(p)}
+                          className={cn(
+                            "w-full text-left p-2.5 transition-colors flex items-center justify-between text-xs",
+                            isSelected
+                              ? "bg-primary/10 border-l-4 border-primary"
+                              : "hover:bg-muted/60"
+                          )}
+                        >
+                          <div>
+                            <div className="font-semibold text-foreground">
+                              Invoice: {p.invoiceNo || p.id}
+                            </div>
+                            <div className="text-muted-foreground text-[11px]">
+                              Date: {p.date} · Items: {p.items?.length || 0}
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <div className="font-semibold text-foreground">₹{p.total.toLocaleString("en-IN")}</div>
+                            {isSelected && (
+                              <Badge className="bg-primary/20 text-primary text-[10px] h-4">Selected</Badge>
+                            )}
+                          </div>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Step 3: Select Medicines & Enter Return Quantities */}
             {selectedPurchase && (
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <Label className="text-xs font-semibold">
-                    Step 2 — Select Medicines & Enter Return Quantities
+                    Step 3 — Select Medicines & Enter Return Quantities
                   </Label>
                   <span className="text-xs text-muted-foreground">
-                    Supplier: <strong className="text-foreground">{selectedPurchase.supplier}</strong>
+                    Invoice: <strong className="text-foreground">{selectedPurchase.invoiceNo}</strong>
                   </span>
                 </div>
 
@@ -556,26 +731,32 @@ function PurchaseReturnsPage() {
                         <TableHead>Medicine</TableHead>
                         <TableHead>Batch</TableHead>
                         <TableHead className="text-center">Purchased</TableHead>
+                        <TableHead className="text-center">Already Ret.</TableHead>
+                        <TableHead className="text-center">Returnable</TableHead>
                         <TableHead className="text-center">In Stock</TableHead>
-                        <TableHead className="text-center">Return Qty</TableHead>
-                        <TableHead className="text-right">Rate</TableHead>
+                        <TableHead className="text-center w-28">Return Qty (Units)</TableHead>
+                        <TableHead className="text-right">P. Rate</TableHead>
                         <TableHead className="text-right">Total Debit</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {returnItems.map((item, idx) => {
                         const lineDebit = item.returnQty * item.purchaseRate * (1 + item.gst / 100);
+                        const maxAllowed = Math.min(item.returnableQty, item.currentStock);
+                        const isExhausted = item.returnableQty <= 0;
+
                         return (
                           <TableRow
                             key={idx}
-                            className={cn(item.selected && "bg-primary/5")}
+                            className={cn(item.selected && "bg-primary/5", isExhausted && "opacity-50")}
                           >
                             <TableCell>
                               <input
                                 type="checkbox"
                                 checked={item.selected}
+                                disabled={maxAllowed <= 0}
                                 onChange={() => toggleItem(idx)}
-                                className="h-4 w-4 rounded border-gray-300 text-primary cursor-pointer"
+                                className="h-4 w-4 rounded border-gray-300 text-primary cursor-pointer disabled:opacity-40"
                               />
                             </TableCell>
                             <TableCell>
@@ -584,6 +765,12 @@ function PurchaseReturnsPage() {
                             </TableCell>
                             <TableCell className="font-mono text-xs">{item.batch || "—"}</TableCell>
                             <TableCell className="text-center font-mono text-xs">{item.originalQty}</TableCell>
+                            <TableCell className="text-center font-mono text-xs text-muted-foreground">
+                              {item.alreadyReturnedQty}
+                            </TableCell>
+                            <TableCell className="text-center font-mono text-xs font-semibold text-emerald-600">
+                              {item.returnableQty}
+                            </TableCell>
                             <TableCell className="text-center font-mono text-xs">
                               <Badge
                                 variant={item.currentStock > 0 ? "outline" : "destructive"}
@@ -596,7 +783,8 @@ function PurchaseReturnsPage() {
                               <Input
                                 type="number"
                                 min={0}
-                                max={Math.min(item.originalQty, item.currentStock)}
+                                max={maxAllowed}
+                                disabled={maxAllowed <= 0}
                                 value={item.returnQty || ""}
                                 placeholder="0"
                                 onFocus={(e) => e.target.select()}
@@ -643,10 +831,10 @@ function PurchaseReturnsPage() {
               </div>
             )}
 
-            {/* Step 3: Return Reason */}
+            {/* Step 4: Return Reason */}
             {selectedPurchase && (
               <div className="space-y-2">
-                <Label className="text-xs font-semibold">Step 3 — Return Reason</Label>
+                <Label className="text-xs font-semibold">Step 4 — Return Reason</Label>
                 <div className="flex flex-wrap gap-1.5">
                   {COMMON_REASONS.map((r) => (
                     <button
@@ -679,7 +867,7 @@ function PurchaseReturnsPage() {
                 <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-amber-600" />
                 <div>
                   Stock will be <strong>reduced by {activeReturns.items.reduce((s, it) => s + it.returnQty, 0)} base units</strong> across {activeReturns.items.length} medicine(s).
-                  The original purchase invoice will remain intact for audit logs.
+                  The original purchase invoice will remain intact for audit records.
                 </div>
               </div>
             )}
@@ -693,7 +881,7 @@ function PurchaseReturnsPage() {
               size="sm"
               onClick={handleConfirmReturn}
               disabled={saving || !selectedPurchase || activeReturns.items.length === 0 || !reason.trim()}
-              className="gap-1.5"
+              className="gap-1.5 bg-primary text-primary-foreground"
             >
               {saving ? "Processing…" : (
                 <>

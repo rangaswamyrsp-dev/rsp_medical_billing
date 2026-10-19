@@ -7,7 +7,16 @@ import {
   sb_updateMedicine,
   sb_deleteMedicine,
   sb_bulkInsertMedicines,
+  sb_generateMedicineId,
+  sb_generateMedicineCode,
+  extractMedicinePrefix,
+  formatMedicineId,
+  parsePrefixCodeSeq,
+  normalizeMedName,
+  normaliseMedName,
+  findMatchingMedicine,
 } from "@/lib/medicines-supabase";
+import { parsePackInfo } from "@/lib/medicine-units";
 import {
   sb_fetchCustomers,
   sb_insertCustomer,
@@ -24,6 +33,7 @@ import {
 import {
   sb_fetchPurchases,
   sb_insertPurchase,
+  sb_updatePurchase,
   sb_deletePurchase,
 } from "@/lib/purchases-supabase";
 import {
@@ -179,14 +189,28 @@ export type SalesReturn = {
   createdAt: string;
 };
 
+export type PurchaseItem = {
+  name: string;
+  batch: string;
+  qty: number;
+  rate: number;
+  gst: number;
+  mrp?: number;
+  expiry?: string;
+  pack?: string;
+  units?: string;
+};
+
 export type Purchase = {
   id: string;
   date: string;
   supplier: string;
   supplierId?: string;
   invoiceNo: string;
-  items: { name: string; batch: string; qty: number; rate: number; gst: number }[];
+  items: PurchaseItem[];
   total: number;
+  status?: "PENDING" | "RECEIVED" | "RETURNED";
+  notes?: string;
 };
 
 export type PurchaseReturnItem = {
@@ -220,7 +244,7 @@ export type PurchaseReturn = {
 };
 
 export type PrinterSettings = {
-  paperSize: "58mm" | "80mm" | "A4";
+  paperSize: "50mm" | "58mm" | "80mm" | "A4";
   storeName: string;
   storeAddress: string;
   storePhone: string;
@@ -353,7 +377,7 @@ const SEED_EMPLOYEES: Employee[] = [
 
 const SEED_PURCHASES: Purchase[] = [];
 
-type State = {
+export type State = {
   medicines: Medicine[];
   customers: Customer[];
   suppliers: Supplier[];
@@ -884,25 +908,32 @@ function actorLabel(actor?: { id: string; name: string }) {
   return `${actor.id} · ${actor.name}`;
 }
 
-/** Product key = same name + same company. Every batch of it shares one product code. */
-function productKey(name: string, company?: string) {
-  return `${(name ?? "").trim().toLowerCase()}|${(company ?? "").trim().toLowerCase()}`;
+/**
+ * Resolve the product code for a new medicine:
+ *  1. If the medicine already has a code, keep it.
+ *  2. If an existing medicine matches (by normalized name, strength, and composition), reuse its code.
+ *  3. Otherwise return null — caller must request a new code from the DB.
+ */
+function resolveExistingCode(
+  list: Medicine[],
+  m: { name: string; company?: string; code?: string; generic?: string },
+): string | null {
+  if (m.code?.trim()) return m.code.trim();
+  const match = findMatchingMedicine(m, list);
+  return match?.code ?? null;
 }
 
-/** Reuse the existing product code when the same product already exists (different batch / expiry / price). */
+/** Local fallback if DB code generation is unreachable. */
 function resolveCode(list: Medicine[], m: { name: string; company?: string; code?: string }): string {
-  if (m.code?.trim()) return m.code.trim();
-  const key = productKey(m.name, m.company);
-  const twin = list.find((x) => productKey(x.name, x.company) === key && x.code);
-  if (twin?.code) return twin.code;
-  const used = new Set(list.map((x) => x.code).filter(Boolean) as string[]);
-  let n = list.length + 1;
-  let code = "";
-  do {
-    code = "M" + String(n).padStart(4, "0");
-    n++;
-  } while (used.has(code));
-  return code;
+  const existing = resolveExistingCode(list, m);
+  if (existing) return existing;
+  const pfx = extractMedicinePrefix(m.name);
+  let maxSeq = 0;
+  list.forEach((x) => {
+    const n = parsePrefixCodeSeq(x.code, pfx);
+    if (n > maxSeq) maxSeq = n;
+  });
+  return formatMedicineId(pfx, maxSeq + 1);
 }
 
 export function nextProductCode(name: string, company?: string): string {
@@ -915,7 +946,14 @@ export const actions = {
   },
   async addMedicine(m: Omit<Medicine, "id">, actor?: { id: string; name: string }): Promise<{ medicine: Medicine; error: string | null }> {
     const tid = getCurrentTenantId();
-    const code = resolveCode(state.medicines, m);
+    // Reuse code from an existing matching product (same normalized name, strength, composition),
+    // else mint a new ACA0001 / ACE0001 / ACI0001 code from DB
+    const existingCode = resolveExistingCode(state.medicines, m);
+    let code = existingCode;
+    if (!code) {
+      const { codes } = await sb_generateMedicineId(tid, m.name, 1);
+      code = codes[0] ?? resolveCode(state.medicines, m); // fallback to local sequence if DB unreachable
+    }
     const purchaseRate = m.new_rate !== undefined ? Number(m.new_rate) : (m.cost !== undefined ? Number(m.cost) : 0);
     const profit = Math.max(0, (Number(m.mrp) || 0) - purchaseRate);
     const newMed: Medicine = {
@@ -961,24 +999,50 @@ export const actions = {
   },
   async bulkAddMedicines(list: Omit<Medicine, "id">[]): Promise<{ error: string | null }> {
     const tid = getCurrentTenantId();
+    if (list.length === 0) return { error: null };
+
+    const snapshot = state.medicines;
+
+    // Group items needing new codes by 3-letter prefix so sequential codes are reserved properly per prefix
+    const neededByPrefix = new Map<string, Array<{ index: number; name: string }>>();
+    list.forEach((m, idx) => {
+      const ex = resolveExistingCode(snapshot, m);
+      if (!ex) {
+        const pfx = extractMedicinePrefix(m.name);
+        if (!neededByPrefix.has(pfx)) neededByPrefix.set(pfx, []);
+        neededByPrefix.get(pfx)!.push({ index: idx, name: m.name });
+      }
+    });
+
+    const codeByIndex = new Map<number, string>();
+    for (const [pfx, items] of neededByPrefix.entries()) {
+      const { codes } = await sb_generateMedicineId(tid, items[0].name, items.length);
+      items.forEach((it, i) => {
+        codeByIndex.set(it.index, codes[i] || resolveCode(snapshot, { name: it.name }));
+      });
+    }
+
     const createdList: Medicine[] = [];
     const nowIso = new Date().toISOString();
+
+    list.forEach((m, i) => {
+      const existingCode = resolveExistingCode(snapshot, m);
+      const code = existingCode || codeByIndex.get(i) || resolveCode(snapshot, m);
+      const purchaseRate = m.new_rate !== undefined ? Number(m.new_rate) : (m.cost !== undefined ? Number(m.cost) : 0);
+      const profit = Math.max(0, (Number(m.mrp) || 0) - purchaseRate);
+      const item: Medicine = {
+        ...m,
+        cost: purchaseRate,
+        new_rate: purchaseRate,
+        profit,
+        code,
+        created_at: m.created_at || nowIso,
+        id: "M" + Date.now().toString(36) + "-" + (i + 1) + "-" + Math.random().toString(36).slice(2, 6),
+      };
+      createdList.push(item);
+    });
+
     setState((s) => {
-      list.forEach((m, i) => {
-        const code = resolveCode(s.medicines, m);
-        const purchaseRate = m.new_rate !== undefined ? Number(m.new_rate) : (m.cost !== undefined ? Number(m.cost) : 0);
-        const profit = Math.max(0, (Number(m.mrp) || 0) - purchaseRate);
-        const item: Medicine = {
-          ...m,
-          cost: purchaseRate,
-          new_rate: purchaseRate,
-          profit,
-          code,
-          created_at: m.created_at || nowIso,
-          id: "M" + Date.now().toString(36) + "-" + (i + 1) + "-" + Math.random().toString(36).slice(2, 6),
-        };
-        createdList.push(item);
-      });
       s.medicines = [...createdList, ...s.medicines];
     });
     audit({ actor: "system", action: "medicine.add", target: `${list.length} products (bulk)` });
@@ -986,6 +1050,7 @@ export const actions = {
     const { error } = await sb_bulkInsertMedicines(tid, createdList);
     return { error };
   },
+
 
   async adjustStock(id: string, delta: number, reason: string, actor?: { id: string; name: string }) {
     const tid = getCurrentTenantId();
@@ -1129,27 +1194,66 @@ export const actions = {
   syncPurchases(tenantId?: string) {
     return syncPurchasesFromSupabase(tenantId);
   },
-  async addPurchase(p: Omit<Purchase, "id">, actor?: { id: string; name: string }): Promise<{ purchase: Purchase; error: string | null }> {
+  async addPurchaseDraft(p: Omit<Purchase, "id">, actor?: { id: string; name: string }): Promise<{ purchase: Purchase; error: string | null }> {
     const tid = getCurrentTenantId();
-    const rec: Purchase = { ...p, id: "P" + Date.now().toString().slice(-6) };
-    const affectedMeds: { id: string; patch: Partial<Medicine> }[] = [];
+    const rec: Purchase = {
+      ...p,
+      id: "P" + Date.now().toString().slice(-6),
+      status: "PENDING",
+    };
     setState((s) => {
       s.purchases.unshift(rec);
-      // Increase stock and update purchase rate (FEFO friendly: keeps batch expiry data intact per medicine)
-      p.items.forEach((it) => {
+    });
+    audit({
+      actor: actorLabel(actor),
+      action: "purchase.draft_create",
+      target: p.invoiceNo,
+      detail: `Draft: ${p.supplier} · ₹${p.total}`,
+    });
+    const { error } = await sb_insertPurchase(tid, rec);
+    return { purchase: rec, error };
+  },
+
+  async confirmPurchase(id: string, actor?: { id: string; name: string }): Promise<{ purchase?: Purchase; error: string | null; alreadyConfirmed?: boolean }> {
+    const tid = getCurrentTenantId();
+    const current = state.purchases.find((p) => p.id === id);
+    if (!current) return { error: "Purchase not found" };
+
+    // Idempotency guard: cannot finalize an already finalized purchase
+    if (current.status === "RECEIVED") {
+      return { purchase: current, error: null, alreadyConfirmed: true };
+    }
+
+    const affectedMeds: { id: string; patch: Partial<Medicine> }[] = [];
+    let updatedPurchase: Purchase = { ...current, status: "RECEIVED" };
+
+    setState((s) => {
+      const idx = s.purchases.findIndex((p) => p.id === id);
+      if (idx >= 0) {
+        s.purchases[idx] = { ...s.purchases[idx], status: "RECEIVED" };
+        updatedPurchase = s.purchases[idx];
+      }
+
+      // Update medicine stock once upon final confirmation using standard formula:
+      // Stock Added = (Qty in Packs × Units Per Pack) + Extra Qty
+      updatedPurchase.items.forEach((it) => {
         const m = s.medicines.find(
           (x) =>
             x.name.trim().toLowerCase() === it.name.trim().toLowerCase() &&
             x.batch.trim().toLowerCase() === it.batch.trim().toLowerCase()
         );
         if (m) {
-          m.stock += it.qty;
+          const pInfo = parsePackInfo(m);
+          const packSize = (it as any).packSize || pInfo.packSize || 1;
+          const extra = Number((it as any).extraQty) || 0;
+          const unitsToAdd = (Number(it.qty) || 0) * packSize + extra;
+          m.stock += unitsToAdd;
           const patch: Partial<Medicine> = { stock: m.stock };
           if (it.rate && it.rate > 0) {
-            const current = m.new_rate ?? m.cost ?? 0;
-            if (current > 0 && current !== it.rate) {
-              m.old_rate = current;
-              patch.old_rate = current;
+            const currentRate = m.new_rate ?? m.cost ?? 0;
+            if (currentRate > 0 && currentRate !== it.rate) {
+              m.old_rate = currentRate;
+              patch.old_rate = currentRate;
             }
             m.new_rate = it.rate;
             m.cost = it.rate;
@@ -1157,19 +1261,96 @@ export const actions = {
             patch.new_rate = it.rate;
             patch.cost = it.rate;
           }
-          if (p.supplier && !m.supplier) {
-            m.supplier = p.supplier;
-            patch.supplier = p.supplier;
+          if (updatedPurchase.supplier && !m.supplier) {
+            m.supplier = updatedPurchase.supplier;
+            patch.supplier = updatedPurchase.supplier;
           }
-          if (p.supplierId && !m.supplierId) {
-            m.supplierId = p.supplierId;
-            patch.supplierId = p.supplierId;
+          if (updatedPurchase.supplierId && !m.supplierId) {
+            m.supplierId = updatedPurchase.supplierId;
+            patch.supplierId = updatedPurchase.supplierId;
           }
           affectedMeds.push({ id: m.id, patch });
         }
       });
     });
-    audit({ actor: actorLabel(actor), action: "purchase.add", target: p.invoiceNo, detail: `${p.supplier} · ₹${p.total}` });
+
+    audit({
+      actor: actorLabel(actor),
+      action: "purchase.confirm",
+      target: updatedPurchase.invoiceNo,
+      detail: `Finalized: ${updatedPurchase.supplier} · ₹${updatedPurchase.total}`,
+    });
+
+    const { error } = await sb_updatePurchase(tid, id, { status: "RECEIVED" });
+    if (affectedMeds.length > 0) {
+      const BATCH_SIZE = 25;
+      (async () => {
+        for (let i = 0; i < affectedMeds.length; i += BATCH_SIZE) {
+          const batch = affectedMeds.slice(i, i + BATCH_SIZE);
+          await Promise.all(
+            batch.map((item) =>
+              sb_updateMedicine(tid, item.id, item.patch).catch((err) =>
+                console.error("[store] confirmPurchase stock update failed:", err)
+              )
+            )
+          );
+        }
+      })();
+    }
+
+    return { purchase: updatedPurchase, error };
+  },
+
+  async addPurchase(p: Omit<Purchase, "id">, actor?: { id: string; name: string }): Promise<{ purchase: Purchase; error: string | null }> {
+    const tid = getCurrentTenantId();
+    const statusVal = p.status || "RECEIVED";
+    const rec: Purchase = { ...p, id: "P" + Date.now().toString().slice(-6), status: statusVal };
+    const affectedMeds: { id: string; patch: Partial<Medicine> }[] = [];
+    setState((s) => {
+      s.purchases.unshift(rec);
+      // Only increase stock if status is RECEIVED (finalized)
+      if (statusVal === "RECEIVED") {
+        p.items.forEach((it) => {
+          const m = s.medicines.find(
+            (x) =>
+              x.name.trim().toLowerCase() === it.name.trim().toLowerCase() &&
+              x.batch.trim().toLowerCase() === it.batch.trim().toLowerCase()
+          );
+          if (m) {
+            const pInfo = parsePackInfo(m);
+            const packSize = (it as any).packSize || pInfo.packSize || 1;
+            const extra = Number((it as any).extraQty) || 0;
+            const unitsToAdd = (it as any).qtyMode === "packs"
+              ? (Number(it.qty) || 0) * packSize + extra
+              : (Number(it.qty) || 0);
+            m.stock += unitsToAdd;
+            const patch: Partial<Medicine> = { stock: m.stock };
+            if (it.rate && it.rate > 0) {
+              const current = m.new_rate ?? m.cost ?? 0;
+              if (current > 0 && current !== it.rate) {
+                m.old_rate = current;
+                patch.old_rate = current;
+              }
+              m.new_rate = it.rate;
+              m.cost = it.rate;
+              m.profit = Math.max(0, m.mrp - it.rate);
+              patch.new_rate = it.rate;
+              patch.cost = it.rate;
+            }
+            if (p.supplier && !m.supplier) {
+              m.supplier = p.supplier;
+              patch.supplier = p.supplier;
+            }
+            if (p.supplierId && !m.supplierId) {
+              m.supplierId = p.supplierId;
+              patch.supplierId = p.supplierId;
+            }
+            affectedMeds.push({ id: m.id, patch });
+          }
+        });
+      }
+    });
+    audit({ actor: actorLabel(actor), action: statusVal === "PENDING" ? "purchase.draft_create" : "purchase.add", target: p.invoiceNo, detail: `${p.supplier} · ₹${p.total}` });
 
     const { error } = await sb_insertPurchase(tid, rec);
     if (affectedMeds.length > 0) {
@@ -1188,6 +1369,18 @@ export const actions = {
       })();
     }
     return { purchase: rec, error };
+  },
+  async updatePurchase(id: string, patch: Partial<Purchase>): Promise<{ error: string | null }> {
+    const tid = getCurrentTenantId();
+    setState((s) => {
+      const idx = s.purchases.findIndex((x) => x.id === id);
+      if (idx >= 0) {
+        s.purchases[idx] = { ...s.purchases[idx], ...patch };
+      }
+    });
+    audit({ actor: "system", action: "purchase.update", module: "Purchases", target: id, detail: JSON.stringify(patch) });
+    const { error } = await sb_updatePurchase(tid, id, patch);
+    return { error };
   },
   async deletePurchase(id: string): Promise<{ error: string | null }> {
     const tid = getCurrentTenantId();
@@ -1357,19 +1550,42 @@ export const actions = {
       createdAt: now,
     };
 
+    // 0. Validate return quantities against previously returned amounts for this sale
+    const existingReturns = state.salesReturns.filter((r) => r.originalSaleId === payload.originalSaleId);
+    for (const it of payload.returnItems) {
+      const previouslyReturned = existingReturns.reduce((sum, r) => {
+        const found = r.items.find(
+          (ri) =>
+            (ri.medicineId && ri.medicineId === it.medicineId) ||
+            (ri.medicineName.trim().toLowerCase() === it.medicineName.trim().toLowerCase() &&
+              (ri.batch || "").trim().toLowerCase() === (it.batch || "").trim().toLowerCase())
+        );
+        return sum + (found ? Number(found.returnedQty) || 0 : 0);
+      }, 0);
+      const remainingReturnable = Math.max(0, it.originalQty - previouslyReturned);
+      if (it.returnedQty > remainingReturnable) {
+        return {
+          ret: {} as any,
+          error: `Return quantity (${it.returnedQty}) for ${it.medicineName} exceeds eligible sold quantity (${remainingReturnable}).`,
+        };
+      }
+    }
+
     // 1. Optimistic state update
     const restoredMeds: { id: string; stock: number }[] = [];
     setState((s) => {
       s.salesReturns.unshift(record);
-      // Restore stock: match by medicineId first, then name+batch, then name only
+      // Restore stock only for saleable items physically accepted back
       payload.returnItems.forEach((it) => {
-        const unitsToRestore = it.returnedQty; // exact base units only
-        let med = s.medicines.find((m) => m.id === it.medicineId && it.medicineId)
-          ?? s.medicines.find((m) => m.name === it.medicineName && m.batch === it.batch)
-          ?? s.medicines.find((m) => m.name === it.medicineName);
-        if (med) {
-          med.stock += unitsToRestore;
-          restoredMeds.push({ id: med.id, stock: med.stock });
+        if ((it as any).isSaleable !== false) {
+          const unitsToRestore = it.returnedQty; // exact base units only
+          let med = s.medicines.find((m) => m.id === it.medicineId && it.medicineId)
+            ?? s.medicines.find((m) => m.name === it.medicineName && m.batch === it.batch)
+            ?? s.medicines.find((m) => m.name === it.medicineName);
+          if (med) {
+            med.stock += unitsToRestore;
+            restoredMeds.push({ id: med.id, stock: med.stock });
+          }
         }
       });
     });
@@ -1402,6 +1618,7 @@ export const actions = {
     return { error };
   },
 
+
   syncPurchaseReturns(tenantId?: string) {
     return syncPurchaseReturnsFromSupabase(tenantId);
   },
@@ -1431,7 +1648,7 @@ export const actions = {
       reason: string;
     },
     actor?: { id: string; name: string },
-  ): Promise<{ ret: PurchaseReturn; error: string | null }> {
+  ): Promise<{ ret: PurchaseReturn; error: string | null; permissionDenied?: boolean }> {
     const tid = getCurrentTenantId();
     if (!tid) return { ret: {} as any, error: "Tenant ID required" };
 
@@ -1473,16 +1690,10 @@ export const actions = {
       createdAt: now,
     };
 
-    // 1. SAVE TO SUPABASE FIRST — NO LOCAL FALLBACK OR UNVERIFIED STATE
-    const { error: insertError } = await sb_insertPurchaseReturn(tid, record);
-    if (insertError) {
-      // Do NOT modify local purchaseReturns or stock if Supabase fails
-      return { ret: record, error: insertError };
-    }
-
-    // 2. ONLY AFTER SUPABASE SUCCEEDS: Update stock in Supabase and local store
+    // 1. Update local purchase returns state & deduct stock
     const affectedMeds: { id: string; stock: number }[] = [];
     setState((s) => {
+      s.purchaseReturns = [record, ...s.purchaseReturns.filter((x) => x.id !== record.id)];
       payload.returnItems.forEach((it) => {
         let med = s.medicines.find((m) => m.id === it.medicineId && it.medicineId)
           ?? s.medicines.find((m) => m.name === it.medicineName && m.batch === it.batch)
@@ -1494,6 +1705,7 @@ export const actions = {
       });
     });
 
+    // 2. Deduct medicine stock in Supabase
     for (const item of affectedMeds) {
       sb_updateMedicine(tid, item.id, { stock: item.stock }).catch((err) =>
         console.error("[store] createPurchaseReturn stock deduction failed:", err),
@@ -1508,10 +1720,19 @@ export const actions = {
       detail: `Supplier: ${payload.supplierName} · Ref: ${payload.originalPurchaseId} · ₹${totalReturn.toFixed(2)} · ${payload.reason}`,
     });
 
-    // 3. Refresh Purchase Returns directly from Supabase
-    await syncPurchaseReturnsFromSupabase(tid);
+    // 3. Persist to Supabase purchase_returns
+    const { error: insertError } = await sb_insertPurchaseReturn(tid, record);
+    if (!insertError) {
+      await syncPurchaseReturnsFromSupabase(tid);
+    }
 
-    return { ret: record, error: null };
+    const isPermDenied = insertError ? insertError.toLowerCase().includes("permission denied") : false;
+
+    return {
+      ret: record,
+      error: insertError,
+      permissionDenied: isPermDenied,
+    };
   },
 
   async deletePurchaseReturn(id: string, actor?: { id: string; name: string }): Promise<{ error: string | null }> {
@@ -1649,8 +1870,11 @@ export const actions = {
     const status: "paid" | "partial" = payment.status || (actualAmt >= net ? "paid" : "partial");
     const pDate = payment.paymentDate || new Date().toISOString().slice(0, 10);
 
+    const existing = state.salaryPayments.find((p) => p.employeeId === payment.employeeId && p.month === payment.month);
+    const recId = existing?.id || ("SP" + Date.now().toString().slice(-8));
+
     const rec: SalaryPayment = {
-      id: "SP" + Date.now().toString().slice(-8),
+      id: recId,
       tenantId: tid,
       employeeId: payment.employeeId,
       employeeName: payment.employeeName || payment.employeeId,
@@ -1662,8 +1886,8 @@ export const actions = {
       paymentMode: payment.paymentMode || "Cash",
       status,
       notes: payment.notes || undefined,
-      paidAt: new Date().toISOString(),
-      createdAt: new Date().toISOString(),
+      paidAt: existing?.paidAt || new Date().toISOString(),
+      createdAt: existing?.createdAt || new Date().toISOString(),
     };
 
     setState((s) => {

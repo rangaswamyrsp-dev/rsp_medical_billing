@@ -284,7 +284,9 @@ type LedgerRow = {
 // ─── Main Page ────────────────────────────────────────────────────────────────
 function AccountsPage() {
   const sales = useStore((s) => s.sales);
+  const salesReturns = useStore((s) => s.salesReturns);
   const purchases = useStore((s) => s.purchases);
+  const purchaseReturns = useStore((s) => s.purchaseReturns);
   const financeEntries = useStore((s) => s.financeEntries);
   const salaryPayments = useStore((s) => s.salaryPayments);
   const employees = useStore((s) => s.employees);
@@ -293,7 +295,9 @@ function AccountsPage() {
 
   useEffect(() => {
     actions.syncSales().catch(() => {});
+    actions.syncSalesReturns().catch(() => {});
     actions.syncPurchases().catch(() => {});
+    actions.syncPurchaseReturns().catch(() => {});
     actions.syncFinanceEntries().catch(() => {});
     actions.syncSalaryPayments().catch(() => {});
   }, []);
@@ -332,7 +336,32 @@ function AccountsPage() {
         };
       });
 
-    // 2. Project completed purchases as Expense
+    // 2. Project Sales Returns as negative income / revenue deduction (outflow / refund)
+    const salesReturnRows: LedgerRow[] = salesReturns.map((r) => {
+      const dStr = r.returnDate ? r.returnDate.slice(0, 10) : today();
+      const refundMode = (r as any).paymentMode === "credit"
+        ? "Credit Note"
+        : (r as any).paymentMode === "online"
+          ? "Online / UPI Refund"
+          : "Cash Refund";
+
+      return {
+        id: r.id,
+        source: "SALES_RETURN" as any,
+        sourceLabel: "Sales Return",
+        type: "expense",
+        date: dStr,
+        rawDate: r.returnDate || dStr,
+        title: `Return ${r.returnNo} · Refund to ${r.customerName || "Customer"}`,
+        category: "Sales Return / Refund",
+        amount: Number(r.returnAmount) || 0,
+        paymentMode: refundMode,
+        reference: `Original Bill: ${r.originalSaleId}`,
+        isDeletable: false,
+      };
+    });
+
+    // 3. Project completed purchases as Expense
     const purchasesRows: LedgerRow[] = purchases.map((p) => {
       const dStr = p.date ? p.date.slice(0, 10) : today();
       return {
@@ -351,7 +380,26 @@ function AccountsPage() {
       };
     });
 
-    // 3. Project confirmed salary payments as Expense
+    // 4. Project Purchase Returns as expense recovery / supplier credit
+    const purchaseReturnRows: LedgerRow[] = purchaseReturns.map((pr) => {
+      const dStr = pr.returnDate ? pr.returnDate.slice(0, 10) : today();
+      return {
+        id: pr.id,
+        source: "PURCHASE_RETURN" as any,
+        sourceLabel: "Purchase Return",
+        type: "income",
+        date: dStr,
+        rawDate: pr.returnDate || dStr,
+        title: `Purchase Return ${pr.returnNo} · Credit from ${pr.supplierName || "Supplier"}`,
+        category: "Purchase Return / Credit",
+        amount: Number(pr.returnAmount) || 0,
+        paymentMode: "Supplier Credit",
+        reference: `Original PO: ${pr.originalPurchaseId}`,
+        isDeletable: false,
+      };
+    });
+
+    // 5. Project confirmed salary payments as Expense
     const currentTid = me?.tenantId || "T001";
     const salaryRows: LedgerRow[] = salaryPayments
       .filter((p) => {
@@ -381,7 +429,7 @@ function AccountsPage() {
         };
       });
 
-    // 4. Project manual finance entries
+    // 6. Project manual finance entries (prevent duplicate customer refunds if already in sales returns)
     const manualRows: LedgerRow[] = financeEntries.map((fe) => {
       const isInc = fe.type === "income";
       const dStr = fe.date ? fe.date.slice(0, 10) : today();
@@ -402,12 +450,12 @@ function AccountsPage() {
     });
 
     // Combine and sort by date descending
-    return [...salesRows, ...purchasesRows, ...salaryRows, ...manualRows].sort((a, b) => {
+    return [...salesRows, ...salesReturnRows, ...purchasesRows, ...purchaseReturnRows, ...salaryRows, ...manualRows].sort((a, b) => {
       const cmp = b.date.localeCompare(a.date);
       if (cmp !== 0) return cmp;
       return (b.rawDate || "").localeCompare(a.rawDate || "");
     });
-  }, [sales, purchases, salaryPayments, employees, financeEntries, me?.tenantId]);
+  }, [sales, salesReturns, purchases, purchaseReturns, salaryPayments, employees, financeEntries, me?.tenantId]);
 
   const filtered = useMemo(() => {
     return allLedgerEntries.filter((e) => {
@@ -427,28 +475,71 @@ function AccountsPage() {
   }, [allLedgerEntries, filterMonth, filterType, filterCategory, search]);
 
   const summary = useMemo(() => {
-    const monthEntries = filterMonth
-      ? allLedgerEntries.filter((e) => e.date.startsWith(filterMonth))
-      : allLedgerEntries;
-    const income = monthEntries
-      .filter((e) => e.type === "income")
-      .reduce((n, e) => n + e.amount, 0);
-    const expense = monthEntries
-      .filter((e) => e.type === "expense")
-      .reduce((n, e) => n + e.amount, 0);
+    const inPeriod = (dStr: string) => (!filterMonth ? true : dStr.startsWith(filterMonth));
+
+    // Sales and Returns
+    const validSales = sales.filter((s) => s.status !== "cancelled" && inPeriod(s.date ? s.date.slice(0, 10) : today()));
+    const grossSales = validSales.reduce((acc, s) => acc + (Number(s.grand) || 0), 0);
+
+    const validSalesReturns = salesReturns.filter((r) => inPeriod(r.returnDate ? r.returnDate.slice(0, 10) : today()));
+    const totalSalesReturns = validSalesReturns.reduce((acc, r) => acc + (Number(r.returnAmount) || 0), 0);
+    const netSales = Math.max(0, grossSales - totalSalesReturns);
+
+    // Purchases and Returns
+    const validPurchases = purchases.filter((p) => inPeriod(p.date ? p.date.slice(0, 10) : today()));
+    const grossPurchases = validPurchases.reduce((acc, p) => acc + (Number(p.total) || 0), 0);
+
+    const validPurchaseReturns = purchaseReturns.filter((r) => inPeriod(r.returnDate ? r.returnDate.slice(0, 10) : today()));
+    const totalPurchaseReturns = validPurchaseReturns.reduce((acc, r) => acc + (Number(r.returnAmount) || 0), 0);
+    const netPurchases = Math.max(0, grossPurchases - totalPurchaseReturns);
+
+    // Operational expenses & Manual Income
+    const currentTid = me?.tenantId || "T001";
+    const validSalaries = salaryPayments.filter((p) => {
+      if (p.tenantId && p.tenantId !== currentTid) return false;
+      const dStr = p.paymentDate || (p.paidAt ? p.paidAt.slice(0, 10) : today());
+      return inPeriod(dStr);
+    });
+    const totalSalaries = validSalaries.reduce((acc, p) => acc + (Number(p.amountPaid ?? p.amount) || 0), 0);
+
+    const validManualEntries = financeEntries.filter((fe) => inPeriod(fe.date ? fe.date.slice(0, 10) : today()));
+    const manualIncome = validManualEntries
+      .filter((fe) => fe.type === "income")
+      .reduce((acc, fe) => acc + (Number(fe.amount) || 0), 0);
+    const manualExpense = validManualEntries
+      .filter((fe) => fe.type === "expense")
+      .reduce((acc, fe) => acc + (Number(fe.amount) || 0), 0);
+
+    const operatingExpenses = totalSalaries + manualExpense;
+    const totalIncome = netSales + manualIncome;
+    const totalExpense = netPurchases + operatingExpenses;
+    const netBalance = totalIncome - totalExpense;
+
     return {
-      income,
-      expense,
-      net: income - expense,
+      grossSales,
+      totalSalesReturns,
+      netSales,
+      grossPurchases,
+      totalPurchaseReturns,
+      netPurchases,
+      operatingExpenses,
+      manualIncome,
+      totalIncome,
+      totalExpense,
+      netBalance,
       count: filtered.length,
     };
-  }, [allLedgerEntries, filterMonth, filtered.length]);
+  }, [sales, salesReturns, purchases, purchaseReturns, salaryPayments, financeEntries, filterMonth, me?.tenantId, filtered.length]);
 
   const availableCategories = useMemo(() => {
     const cats = new Set<string>();
-    if (filterType === "all" || filterType === "income") cats.add("Sales Revenue");
+    if (filterType === "all" || filterType === "income") {
+      cats.add("Sales Revenue");
+      cats.add("Purchase Return / Credit");
+    }
     if (filterType === "all" || filterType === "expense") {
       cats.add("Inventory Purchase");
+      cats.add("Sales Return / Refund");
       cats.add("Salary");
     }
     allLedgerEntries
@@ -495,16 +586,74 @@ function AccountsPage() {
         </div>
       </div>
 
-      {/* Summary Cards */}
+      {/* Summary KPI Cards - Row 1: Sales & Revenue Breakdown */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <Card className="p-4 border-l-4 border-l-emerald-500">
           <div className="flex items-start justify-between">
             <div>
-              <p className="text-xs font-semibold text-emerald-600 uppercase tracking-wide">Total Income</p>
-              <p className="text-xl sm:text-2xl font-bold text-emerald-600 tabular-nums mt-1">{fmtAmt(summary.income)}</p>
-              <p className="text-[11px] text-muted-foreground mt-1">Revenues for {monthLabel}</p>
+              <p className="text-xs font-semibold text-emerald-600 uppercase tracking-wide">Gross Sales</p>
+              <p className="text-xl sm:text-2xl font-bold text-emerald-600 tabular-nums mt-1">{fmtAmt(summary.grossSales)}</p>
+              <p className="text-[11px] text-muted-foreground mt-1">Total invoiced sales</p>
             </div>
             <div className="bg-emerald-50 rounded-lg p-2 shrink-0"><TrendingUp className="h-5 w-5 text-emerald-500" /></div>
+          </div>
+        </Card>
+
+        <Card className="p-4 border-l-4 border-l-amber-500">
+          <div className="flex items-start justify-between">
+            <div>
+              <p className="text-xs font-semibold text-amber-600 uppercase tracking-wide">Sales Returns</p>
+              <p className="text-xl sm:text-2xl font-bold text-amber-600 tabular-nums mt-1">-{fmtAmt(summary.totalSalesReturns)}</p>
+              <p className="text-[11px] text-muted-foreground mt-1">Customer refunds deducted</p>
+            </div>
+            <div className="bg-amber-50 rounded-lg p-2 shrink-0"><TrendingDown className="h-5 w-5 text-amber-500" /></div>
+          </div>
+        </Card>
+
+        <Card className="p-4 border-l-4 border-l-teal-600">
+          <div className="flex items-start justify-between">
+            <div>
+              <p className="text-xs font-semibold text-teal-700 uppercase tracking-wide">Net Sales Revenue</p>
+              <p className="text-xl sm:text-2xl font-bold text-teal-700 tabular-nums mt-1">{fmtAmt(summary.netSales)}</p>
+              <p className="text-[11px] text-muted-foreground mt-1">Gross Sales − Returns</p>
+            </div>
+            <div className="bg-teal-50 rounded-lg p-2 shrink-0"><Receipt className="h-5 w-5 text-teal-600" /></div>
+          </div>
+        </Card>
+
+        <Card className="p-4 border-l-4 border-l-blue-500">
+          <div className="flex items-start justify-between">
+            <div>
+              <p className="text-xs font-semibold text-blue-600 uppercase tracking-wide">Total Net Income</p>
+              <p className="text-xl sm:text-2xl font-bold text-blue-600 tabular-nums mt-1">{fmtAmt(summary.totalIncome)}</p>
+              <p className="text-[11px] text-muted-foreground mt-1">Net Sales + other income</p>
+            </div>
+            <div className="bg-blue-50 rounded-lg p-2 shrink-0"><TrendingUp className="h-5 w-5 text-blue-500" /></div>
+          </div>
+        </Card>
+      </div>
+
+      {/* Summary KPI Cards - Row 2: Purchases, Operations & Net Balance */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <Card className="p-4 border-l-4 border-l-purple-500">
+          <div className="flex items-start justify-between">
+            <div>
+              <p className="text-xs font-semibold text-purple-600 uppercase tracking-wide">Gross Purchases</p>
+              <p className="text-xl sm:text-2xl font-bold text-purple-600 tabular-nums mt-1">{fmtAmt(summary.grossPurchases)}</p>
+              <p className="text-[11px] text-muted-foreground mt-1">Supplier bills</p>
+            </div>
+            <div className="bg-purple-50 rounded-lg p-2 shrink-0"><Receipt className="h-5 w-5 text-purple-500" /></div>
+          </div>
+        </Card>
+
+        <Card className="p-4 border-l-4 border-l-cyan-600">
+          <div className="flex items-start justify-between">
+            <div>
+              <p className="text-xs font-semibold text-cyan-700 uppercase tracking-wide">Purchase Returns</p>
+              <p className="text-xl sm:text-2xl font-bold text-cyan-700 tabular-nums mt-1">-{fmtAmt(summary.totalPurchaseReturns)}</p>
+              <p className="text-[11px] text-muted-foreground mt-1">Supplier credits deducted</p>
+            </div>
+            <div className="bg-cyan-50 rounded-lg p-2 shrink-0"><TrendingDown className="h-5 w-5 text-cyan-600" /></div>
           </div>
         </Card>
 
@@ -512,38 +661,27 @@ function AccountsPage() {
           <div className="flex items-start justify-between">
             <div>
               <p className="text-xs font-semibold text-red-500 uppercase tracking-wide">Total Expenses</p>
-              <p className="text-xl sm:text-2xl font-bold text-red-500 tabular-nums mt-1">{fmtAmt(summary.expense)}</p>
-              <p className="text-[11px] text-muted-foreground mt-1">Outflows &amp; purchases for {monthLabel}</p>
+              <p className="text-xl sm:text-2xl font-bold text-red-500 tabular-nums mt-1">{fmtAmt(summary.totalExpense)}</p>
+              <p className="text-[11px] text-muted-foreground mt-1">Net Purchases + Operations</p>
             </div>
             <div className="bg-red-50 rounded-lg p-2 shrink-0"><TrendingDown className="h-5 w-5 text-red-400" /></div>
           </div>
         </Card>
 
-        <Card className={`p-4 border-l-4 ${summary.net >= 0 ? "border-l-primary" : "border-l-red-400"}`}>
+        <Card className={`p-4 border-l-4 ${summary.netBalance >= 0 ? "border-l-primary" : "border-l-red-400"}`}>
           <div className="flex items-start justify-between">
             <div>
-              <p className={`text-xs font-semibold uppercase tracking-wide ${summary.net >= 0 ? "text-primary" : "text-red-500"}`}>
+              <p className={`text-xs font-semibold uppercase tracking-wide ${summary.netBalance >= 0 ? "text-primary" : "text-red-500"}`}>
                 Net Profit / Balance
               </p>
-              <p className={`text-xl sm:text-2xl font-bold tabular-nums mt-1 ${summary.net >= 0 ? "text-primary" : "text-red-500"}`}>
-                {summary.net < 0 ? "-" : ""}{fmtAmt(Math.abs(summary.net))}
+              <p className={`text-xl sm:text-2xl font-bold tabular-nums mt-1 ${summary.netBalance >= 0 ? "text-primary" : "text-red-500"}`}>
+                {summary.netBalance < 0 ? "-" : ""}{fmtAmt(Math.abs(summary.netBalance))}
               </p>
-              <p className="text-[11px] text-muted-foreground mt-1">{summary.net >= 0 ? "Net Profit Balance" : "Net Loss Balance"}</p>
+              <p className="text-[11px] text-muted-foreground mt-1">{summary.netBalance >= 0 ? "Net Surplus" : "Net Deficit"}</p>
             </div>
-            <div className={`rounded-lg p-2 shrink-0 ${summary.net >= 0 ? "bg-primary/10" : "bg-red-50"}`}>
-              <IndianRupee className={`h-5 w-5 ${summary.net >= 0 ? "text-primary" : "text-red-400"}`} />
+            <div className={`rounded-lg p-2 shrink-0 ${summary.netBalance >= 0 ? "bg-primary/10" : "bg-red-50"}`}>
+              <IndianRupee className={`h-5 w-5 ${summary.netBalance >= 0 ? "text-primary" : "text-red-400"}`} />
             </div>
-          </div>
-        </Card>
-
-        <Card className="p-4 border-l-4 border-l-blue-500">
-          <div className="flex items-start justify-between">
-            <div>
-              <p className="text-xs font-semibold text-blue-600 uppercase tracking-wide">Transactions</p>
-              <p className="text-xl sm:text-2xl font-bold text-blue-600 tabular-nums mt-1">{summary.count} Entries</p>
-              <p className="text-[11px] text-muted-foreground mt-1">Recorded in current view</p>
-            </div>
-            <div className="bg-blue-50 rounded-lg p-2 shrink-0"><Receipt className="h-5 w-5 text-blue-500" /></div>
           </div>
         </Card>
       </div>

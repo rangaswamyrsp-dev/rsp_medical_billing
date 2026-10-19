@@ -63,25 +63,44 @@ export async function sb_upsertAttendance(
   if (!tenantId) return { error: "Tenant ID required" };
 
   try {
-    const row: DbAttendanceRow = {
-      id: record.id,
-      tenant_id: tenantId,
-      employee_id: record.employeeId,
-      employee_name: record.employeeName || "",
-      attendance_date: record.date,
-      status: record.status,
-      tasks: record.tasks ?? 0,
-      created_at: record.createdAt || new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-
-    // Upsert using the unique constraint (tenant_id, employee_id, attendance_date)
-    // so marking attendance for the same employee + date will update the record
-    const { error } = await supabase
+    // Check if record exists for this tenant + employee + date
+    const { data: existing } = await supabase
       .from("attendance")
-      .upsert(row, { onConflict: "tenant_id,employee_id,attendance_date" });
+      .select("id")
+      .eq("tenant_id", tenantId)
+      .eq("employee_id", record.employeeId)
+      .eq("attendance_date", record.date)
+      .maybeSingle();
 
-    return { error: error ? error.message : null };
+    if (existing?.id) {
+      const { error } = await supabase
+        .from("attendance")
+        .update({
+          employee_name: record.employeeName || "",
+          status: record.status,
+          tasks: record.tasks ?? 0,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", existing.id)
+        .eq("tenant_id", tenantId);
+
+      return { error: error ? error.message : null };
+    } else {
+      const row: DbAttendanceRow = {
+        id: record.id,
+        tenant_id: tenantId,
+        employee_id: record.employeeId,
+        employee_name: record.employeeName || "",
+        attendance_date: record.date,
+        status: record.status,
+        tasks: record.tasks ?? 0,
+        created_at: record.createdAt || new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      const { error } = await supabase.from("attendance").insert(row);
+      return { error: error ? error.message : null };
+    }
   } catch (err: any) {
     return { error: err?.message ?? String(err) };
   }

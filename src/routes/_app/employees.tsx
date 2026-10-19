@@ -16,7 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import {
   Copy, Eye, EyeOff, Plus, Trash2, UserCog, Shield, IndianRupee, Receipt,
-  CalendarCheck, Printer, CheckCircle2, Clock, XCircle, Users, Wallet,
+  CalendarCheck, Calendar, Printer, CheckCircle2, Clock, XCircle, Users, Wallet,
   ChevronDown,
 } from "lucide-react";
 import { actions, useStore } from "@/lib/store";
@@ -908,13 +908,19 @@ function SalaryPaymentDialog({
 
           {/* Payment Date */}
           <div className="space-y-1.5">
-            <Label className="text-xs font-medium">Payment Date</Label>
-            <Input
-              id="salary-payment-date"
-              type="date"
-              value={paymentDate}
-              onChange={(e) => setPaymentDate(e.target.value)}
-            />
+            <Label className="text-xs font-medium flex items-center gap-1.5">
+              <Calendar className="h-3.5 w-3.5 text-primary" /> Payment Date
+            </Label>
+            <div className="relative">
+              <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
+              <Input
+                id="salary-payment-date"
+                type="date"
+                value={paymentDate}
+                onChange={(e) => setPaymentDate(e.target.value)}
+                className="pl-9 font-medium"
+              />
+            </div>
           </div>
 
           {/* Payment Mode */}
@@ -1025,11 +1031,19 @@ function EmployeesPage() {
     setOpen(false);
   };
 
-  const remove = (id: string) => {
-    if (id === "E001") return toast.error("Main admin can't be removed");
-    if (!confirm("Delete this employee?")) return;
-    actions.deleteEmployee(id, me ? { id: me.id, name: me.name } : undefined);
-    toast.success("Employee removed");
+  const [employeeToDelete, setEmployeeToDelete] = useState<Employee | null>(null);
+
+  const handleDeleteEmployee = (emp: Employee) => {
+    if (emp.id === "E001") return toast.error("Main admin can't be removed");
+    setEmployeeToDelete(emp);
+  };
+
+  const confirmDeleteEmployee = () => {
+    if (!employeeToDelete) return;
+    const name = employeeToDelete.name;
+    actions.deleteEmployee(employeeToDelete.id, me ? { id: me.id, name: me.name } : undefined);
+    toast.success(`Employee "${name}" removed`);
+    setEmployeeToDelete(null);
   };
 
   const resetPw = (id: string) => {
@@ -1204,7 +1218,7 @@ function EmployeesPage() {
                         <TableCell className="text-right tabular-nums text-primary font-semibold">₹{stats.revenue.toLocaleString("en-IN")}</TableCell>
                         <TableCell className="text-right">
                           {isAdmin && !isSeed && (
-                            <Button size="icon" variant="ghost" className="h-8 w-8 text-destructive" onClick={() => remove(e.id)}>
+                            <Button size="icon" variant="ghost" className="h-8 w-8 text-destructive" onClick={() => handleDeleteEmployee(e)}>
                               <Trash2 className="h-4 w-4" />
                             </Button>
                           )}
@@ -1242,7 +1256,7 @@ function EmployeesPage() {
                       </div>
                     </div>
                     {isAdmin && !isSeed && (
-                      <Button size="icon" variant="ghost" className="h-8 w-8 text-destructive shrink-0" onClick={() => remove(e.id)}>
+                      <Button size="icon" variant="ghost" className="h-8 w-8 text-destructive shrink-0" onClick={() => handleDeleteEmployee(e)}>
                         <Trash2 className="h-4 w-4" />
                       </Button>
                     )}
@@ -1313,12 +1327,19 @@ function EmployeesPage() {
             </div>
 
             <div className="space-y-1.5">
-              <Label className="text-xs font-medium">Attendance Date</Label>
-              <Input
-                id="att-date"
-                type="date" value={attDate}
-                onChange={(e) => setAttDate(e.target.value)}
-              />
+              <Label className="text-xs font-medium flex items-center gap-1.5">
+                <Calendar className="h-3.5 w-3.5 text-primary" /> Attendance Date
+              </Label>
+              <div className="relative">
+                <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
+                <Input
+                  id="att-date"
+                  type="date"
+                  value={attDate}
+                  onChange={(e) => setAttDate(e.target.value)}
+                  className="pl-9 font-medium"
+                />
+              </div>
             </div>
 
             <div className="space-y-1.5">
@@ -1380,12 +1401,18 @@ function EmployeesPage() {
             {/* Month Summary Cards */}
             <div className="flex items-center gap-3 flex-wrap">
               <div className="flex items-center gap-2">
-                <span className="text-sm font-medium text-muted-foreground">Month:</span>
-                <Input
-                  type="month" value={attMonth}
-                  onChange={(e) => setAttMonth(e.target.value)}
-                  className="w-40 h-8 text-sm"
-                />
+                <span className="text-sm font-medium text-muted-foreground flex items-center gap-1">
+                  <Calendar className="h-4 w-4 text-primary" /> Month:
+                </span>
+                <div className="relative">
+                  <Calendar className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+                  <Input
+                    type="month"
+                    value={attMonth}
+                    onChange={(e) => setAttMonth(e.target.value)}
+                    className="w-44 h-8 text-sm pl-8 font-medium"
+                  />
+                </div>
               </div>
               <span className="text-sm font-semibold">{fmtMonthLabel(attMonth)}</span>
             </div>
@@ -1541,12 +1568,18 @@ function EmployeesPage() {
               <span className="text-muted-foreground text-sm">·</span>
               <span className="text-sm text-muted-foreground">Salary pro-rated: base ÷ 26 × duty days</span>
               <div className="ml-auto flex items-center gap-2">
-                <span className="text-sm text-muted-foreground">Month:</span>
-                <Input
-                  type="month" value={payMonth}
-                  onChange={(e) => setPayMonth(e.target.value)}
-                  className="w-40 h-8 text-sm"
-                />
+                <span className="text-sm text-muted-foreground flex items-center gap-1">
+                  <Calendar className="h-4 w-4 text-primary" /> Month:
+                </span>
+                <div className="relative">
+                  <Calendar className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+                  <Input
+                    type="month"
+                    value={payMonth}
+                    onChange={(e) => setPayMonth(e.target.value)}
+                    className="w-44 h-8 text-sm pl-8 font-medium"
+                  />
+                </div>
               </div>
             </div>
           </Card>
@@ -1746,6 +1779,27 @@ function EmployeesPage() {
         onClose={() => setPayDialogData(null)}
         data={payDialogData}
       />
+
+      {/* ── Delete Employee Confirmation Modal ── */}
+      <Dialog open={!!employeeToDelete} onOpenChange={(v) => !v && setEmployeeToDelete(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete Employee</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete <span className="font-semibold text-foreground">{employeeToDelete?.name}</span> ({employeeToDelete?.role})?
+              This will remove their profile and access.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button variant="outline" onClick={() => setEmployeeToDelete(null)}>
+              No, Keep
+            </Button>
+            <Button variant="destructive" onClick={confirmDeleteEmployee}>
+              Yes, Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

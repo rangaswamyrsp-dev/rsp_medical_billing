@@ -16,6 +16,7 @@ type DbPurchaseRow = {
   purchase_date: string;
   subtotal?: number;
   total: number;
+  status?: string | null;
   notes?: string | null;
   created_at?: string;
 };
@@ -36,6 +37,31 @@ type DbPurchaseItemRow = {
   total: number;
   created_at?: string;
 };
+
+export function parsePurchaseStatus(row: any): "PENDING" | "RECEIVED" | "RETURNED" {
+  if (row.status) {
+    const s = String(row.status).trim().toUpperCase();
+    if (s === "PENDING" || s === "DRAFT") return "PENDING";
+    if (s === "RETURNED") return "RETURNED";
+    if (s === "RECEIVED" || s === "FINAL") return "RECEIVED";
+  }
+  if (row.notes) {
+    const m = String(row.notes).match(/\[STATUS:(PENDING|DRAFT|RECEIVED|RETURNED|FINAL)\]/i);
+    if (m) {
+      const s = m[1].toUpperCase();
+      if (s === "DRAFT" || s === "PENDING") return "PENDING";
+      if (s === "RETURNED") return "RETURNED";
+      return "RECEIVED";
+    }
+  }
+  return "RECEIVED";
+}
+
+export function encodeStatusNote(status: string | undefined, notes: string | null | undefined): string {
+  const s = status ? status.toUpperCase() : "RECEIVED";
+  const cleanNotes = (notes || "").replace(/\[STATUS:[^\]]+\]\s*/g, "").trim();
+  return `[STATUS:${s}] ${cleanNotes}`.trim();
+}
 
 // ── READ ──────────────────────────────────────────────────────────────────────
 
@@ -73,6 +99,8 @@ export async function sb_fetchPurchases(tenantId: string): Promise<{ purchases: 
       qty: Number(it.quantity ?? it.qty) || 0,
       rate: Number(it.purchase_rate ?? it.rate) || 0,
       gst: Number(it.gst) || 0,
+      mrp: it.mrp ? Number(it.mrp) : undefined,
+      expiry: it.expiry ?? undefined,
     });
   });
 
@@ -84,6 +112,8 @@ export async function sb_fetchPurchases(tenantId: string): Promise<{ purchases: 
     supplierId: r.supplier_id ?? undefined,
     invoiceNo: r.invoice_no ?? r.invoiceNo ?? "",
     total: Number(r.total) || 0,
+    status: parsePurchaseStatus(r),
+    notes: r.notes ? r.notes.replace(/\[STATUS:[^\]]+\]\s*/g, "").trim() : undefined,
     items: itemsByPurchaseId.get(r.id) ?? [],
   }));
 
@@ -111,7 +141,8 @@ export async function sb_insertPurchase(tenantId: string, purchase: Purchase): P
     }
   }
 
-  // 2. Insert header using exact database columns
+  // 2. Insert header using exact database columns with status preserved in notes
+  const statusVal = purchase.status || "RECEIVED";
   const headerRow: Record<string, any> = {
     id: purchase.id,
     tenant_id: tenantId,
@@ -120,6 +151,7 @@ export async function sb_insertPurchase(tenantId: string, purchase: Purchase): P
     invoice_no: purchase.invoiceNo.trim(),
     purchase_date: purchase.date,
     total: Number(purchase.total) || 0,
+    notes: encodeStatusNote(statusVal, purchase.notes),
     created_at: new Date().toISOString(),
   };
 
@@ -129,7 +161,7 @@ export async function sb_insertPurchase(tenantId: string, purchase: Purchase): P
 
   if (pError) return { error: pError.message };
 
-  // 2. Insert line items using exact database columns
+  // 3. Insert line items using exact database columns
   if (purchase.items && purchase.items.length > 0) {
     const itemRows = purchase.items.map((it, idx) => {
       const lineTotal = Math.round(it.qty * it.rate * (1 + it.gst / 100));
@@ -139,9 +171,10 @@ export async function sb_insertPurchase(tenantId: string, purchase: Purchase): P
         tenant_id: tenantId,
         medicine_name: it.name.trim(),
         batch: it.batch.trim(),
+        expiry: it.expiry ? it.expiry.trim() : null,
         quantity: Number(it.qty) || 0,
         purchase_rate: Number(it.rate) || 0,
-        mrp: Math.round(Number(it.rate) * 1.4),
+        mrp: it.mrp ? Number(it.mrp) : Math.round(Number(it.rate) * 1.4),
         gst: Number(it.gst) || 0,
         discount: 0,
         total: lineTotal,
@@ -157,6 +190,76 @@ export async function sb_insertPurchase(tenantId: string, purchase: Purchase): P
         .insert(chunk);
 
       if (iError) return { error: iError.message };
+    }
+  }
+
+  return { error: null };
+}
+
+export async function sb_updatePurchase(
+  tenantId: string,
+  id: string,
+  purchase: Partial<Purchase>
+): Promise<{ error: string | null }> {
+  if (!tenantId) return { error: "Tenant ID required" };
+
+  const updateData: Record<string, any> = {};
+  if (purchase.supplier !== undefined) updateData.supplier_name = purchase.supplier.trim();
+  if (purchase.supplierId !== undefined) updateData.supplier_id = purchase.supplierId || null;
+  if (purchase.invoiceNo !== undefined) updateData.invoice_no = purchase.invoiceNo.trim();
+  if (purchase.date !== undefined) updateData.purchase_date = purchase.date;
+  if (purchase.total !== undefined) updateData.total = Number(purchase.total) || 0;
+  if (purchase.status !== undefined || purchase.notes !== undefined) {
+    updateData.notes = encodeStatusNote(purchase.status, purchase.notes);
+  }
+
+  if (Object.keys(updateData).length > 0) {
+    const { error: pError } = await supabase
+      .from("purchases")
+      .update(updateData)
+      .eq("id", id)
+      .eq("tenant_id", tenantId);
+    if (pError) return { error: pError.message };
+  }
+
+  // Update line items if provided
+  if (purchase.items && Array.isArray(purchase.items)) {
+    // Delete old items
+    await supabase
+      .from("purchase_items")
+      .delete()
+      .eq("purchase_id", id)
+      .eq("tenant_id", tenantId);
+
+    // Insert new items
+    if (purchase.items.length > 0) {
+      const itemRows = purchase.items.map((it, idx) => {
+        const lineTotal = Math.round(it.qty * it.rate * (1 + it.gst / 100));
+        return {
+          id: `${id}_ITEM_${idx + 1}_${Date.now()}`,
+          purchase_id: id,
+          tenant_id: tenantId,
+          medicine_name: it.name.trim(),
+          batch: it.batch.trim(),
+          expiry: it.expiry ? it.expiry.trim() : null,
+          quantity: Number(it.qty) || 0,
+          purchase_rate: Number(it.rate) || 0,
+          mrp: it.mrp ? Number(it.mrp) : Math.round(Number(it.rate) * 1.4),
+          gst: Number(it.gst) || 0,
+          discount: 0,
+          total: lineTotal,
+          created_at: new Date().toISOString(),
+        };
+      });
+
+      const CHUNK_SIZE = 200;
+      for (let i = 0; i < itemRows.length; i += CHUNK_SIZE) {
+        const chunk = itemRows.slice(i, i + CHUNK_SIZE);
+        const { error: iError } = await supabase
+          .from("purchase_items")
+          .insert(chunk);
+        if (iError) return { error: iError.message };
+      }
     }
   }
 

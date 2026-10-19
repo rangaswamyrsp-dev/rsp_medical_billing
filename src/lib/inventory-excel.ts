@@ -1,5 +1,12 @@
 import * as XLSX from "xlsx";
 import type { Medicine } from "@/data/medicines";
+import {
+  parsePackInfo,
+  calculateStock,
+  calculateUnitMrp,
+  calculateUnitPurchaseRate,
+  calculateMedicineValuation,
+} from "./medicine-units";
 
 export interface ParsedImportRow {
   id?: string;
@@ -9,21 +16,29 @@ export interface ParsedImportRow {
   supplierDate?: string;
   company: string; // MFR
   type: string;
-  drugName: string; // Drug Name / Composition (Category removed)
+  drugName: string; // Drug Name / Composition
   hsn: string;
   pack: string;
   batch: string;
   expiry: string;
-  mrp: number;
-  cost: number;
+  mrp: number; // Pack MRP
+  cost: number; // P. Rate
   gst: number;
-  stock: number; // Qty
-  unit?: string;
-  check?: string;
+  qtyPacks: number; // Qty in Packs
+  extraQty: number; // Loose Extra Qty
+  stock: number; // Calculated Authoritative Stock (Base Units)
+  importedStock?: number; // Stock as written in Excel (if provided)
+  stockDiscrepancy?: boolean;
+  unit: string;
+  packSize: number;
+  unitMrp?: number;
+  unitCost?: number;
+  validationErrors?: string[];
+  check?: "OK" | "WARNING" | "ERROR" | "AI" | string;
   source?: string;
 }
 
-export const SAMPLE_EXCEL_PASTE_TEXT = `Medicine Name\tSupplier\tInvoice No\tSupplier Date\tMFR\tDrug Name / Composition\tType\tHSN\tPack\tBatch\tExpiry\tMRP\tPurchase Price\tGST\tQuantity\tUnit\nCETABLOCK TRIO\tAMBIKAA MEDINEEDS\t2600073008278\t29/09/2026\tATO\tACECLOFENAC + PARACETAMOL\tTablet\t30049099\t10x10\t25S3GTB062\t2027-08\t201.56\t170.00\t5\t10\tTablet`;
+export const SAMPLE_EXCEL_PASTE_TEXT = `Medicine Name\tSupplier\tInvoice No\tSupplier Date\tMFR\tDrug Name / Composition\tType\tHSN\tPack\tBatch\tExpiry\tMRP\tP. Rate\tGST\tQty\tExtra Qty\tUnit\nCETABLOCK TRIO\tAMBIKAA MEDINEEDS\t2600073008278\t29/09/2026\tATO\tACECLOFENAC + PARACETAMOL\tTablet\t30049099\t10x10\t25S3GTB062\t2027-08\t201.56\t170.00\t5\t10\t0\tTablet`;
 
 /** Format date string or excel serial to YYYY-MM */
 export function normalizeExpiryDate(val: any): string {
@@ -85,10 +100,7 @@ export function normalizeExpiryDate(val: any): string {
 export function normalizeHsnCode(val: any): string {
   if (!val) return "";
   const str = String(val).trim();
-  // Remove non-alphanumeric except common dashes
-  const clean = str.replace(/[^0-9A-Z]/gi, "");
-  // If it contains valid digits
-  return clean;
+  return str.replace(/[^0-9A-Z]/gi, "");
 }
 
 /** Export full or filtered inventory stock to Excel (.xlsx) */
@@ -99,147 +111,267 @@ export function exportInventoryToExcel(
 ) {
   const dateStr = new Date().toISOString().slice(0, 10);
   const rows = medicines.map((m) => {
-    const purchaseRate = m.new_rate !== undefined ? Number(m.new_rate) : (m.cost !== undefined ? Number(m.cost) : 0);
-    const stockQty = Number(m.stock) || 0;
-    const mrp = Number(m.mrp) || 0;
-    const totalValue = Math.round(stockQty * mrp);
-    const addedDate = m.created_at ? new Date(m.created_at).toLocaleDateString("en-IN") : "";
+    const v = calculateMedicineValuation(m);
+    const info = parsePackInfo(m);
+    const packQty = info.packSize > 1 ? Math.floor(v.stockUnits / info.packSize) : v.stockUnits;
+    const extraQty = info.packSize > 1 ? v.stockUnits % info.packSize : 0;
 
     return {
-      "Product Code": m.code || m.id,
       "Medicine Name": m.name,
-      "Supplier": m.supplier || "",
-      "Manufacturer (MFR)": m.company || "",
-      "Type": m.type || "",
-      "Category": m.category || m.generic || "",
-      "HSN Code": m.hsn || "",
-      "GST %": m.gst ?? 5,
-      "Pack Size": m.pack || "",
+      "Supplier": m.supplier || "—",
+      "MFR": m.company || "—",
+      "Drug Name / Composition": m.generic || "—",
+      "Type": m.type || "Tablet",
+      "HSN": m.hsn || "—",
+      "Pack": m.pack || "—",
       "Batch": m.batch,
-      "Expiry": m.expiry || "",
-      "MRP (Rs)": mrp,
-      "Purchase Price (Rs)": purchaseRate,
-      "Stock Qty": stockQty,
-      "Stock Value (Rs)": totalValue,
-      "Added Date": addedDate,
-      "Box / Rack": [m.box_no, m.rack].filter(Boolean).join(" / "),
+      "Expiry": m.expiry || "—",
+      "MRP (Pack)": v.packMrp.toFixed(2),
+      "P. Rate (Pack)": v.packPurchaseRate.toFixed(2),
+      "GST %": m.gst,
+      "Qty (Packs)": packQty,
+      "Extra Qty": extraQty,
+      "Unit": info.unitLabel,
+      "Stock (Base Units)": v.stockUnits,
+      "Purchase Valuation (Cost)": v.purchaseValuation,
+      "Retail Valuation (MRP)": v.retailValuation,
+      "Rack": m.rack || "—",
     };
   });
 
   const ws = XLSX.utils.json_to_sheet(rows);
-
-  // Column widths
   ws["!cols"] = [
-    { wch: 14 }, // Code
     { wch: 28 }, // Name
     { wch: 22 }, // Supplier
     { wch: 18 }, // MFR
+    { wch: 28 }, // Composition
     { wch: 12 }, // Type
-    { wch: 22 }, // Category
-    { wch: 12 }, // HSN Code
-    { wch: 8 },  // GST %
+    { wch: 12 }, // HSN
     { wch: 12 }, // Pack
     { wch: 14 }, // Batch
     { wch: 12 }, // Expiry
-    { wch: 12 }, // MRP
-    { wch: 16 }, // Purchase Price
-    { wch: 12 }, // Stock Qty
-    { wch: 16 }, // Stock Value
-    { wch: 14 }, // Added Date
-    { wch: 14 }, // Location
+    { wch: 14 }, // MRP
+    { wch: 14 }, // P. Rate
+    { wch: 8 },  // GST
+    { wch: 12 }, // Qty (Packs)
+    { wch: 10 }, // Extra Qty
+    { wch: 12 }, // Unit
+    { wch: 18 }, // Stock
+    { wch: 10 }, // Rack
   ];
 
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, "Inventory Stock");
-
-  const sanitizedStore = storeName.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 20);
-  const tag = filterLabel ? `_${filterLabel.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 25)}` : "";
-  XLSX.writeFile(wb, `Inventory_Stock_${sanitizedStore}${tag}_${dateStr}.xlsx`);
+  XLSX.utils.book_append_sheet(wb, ws, "Inventory");
+  const fileName = `${storeName.replace(/[^a-zA-Z0-9]/g, "_")}_Inventory_${dateStr}.xlsx`;
+  XLSX.writeFile(wb, fileName);
 }
 
-/** Download standard Excel template with sample rows and HSN column */
-export function downloadMedicineImportTemplate() {
+/** Generate a clean template for bulk import matching the standardized 18 fields */
+export function generateMedicineExcelTemplate() {
   const sampleData = [
     {
-      "Medicine Name": "Paracetamol 650mg",
-      "Manufacturer (MFR)": "SUN",
+      "Medicine Name": "CETABLOCK TRIO",
+      "Supplier": "AMBIKAA MEDINEEDS",
+      "Invoice No": "2600073008278",
+      "Supplier Date": "29/09/2026",
+      "MFR": "ATO",
+      "Drug Name / Composition": "ACECLOFENAC + PARACETAMOL",
       "Type": "Tablet",
-      "Category": "Analgesic / Antipyretic",
-      "HSN Code": "300490",
+      "HSN": "30049099",
+      "Pack": "10x10",
+      "Batch": "25S3GTB062",
+      "Expiry": "2027-08",
+      "MRP": 201.56,
+      "P. Rate": 170.00,
       "GST %": 5,
-      "Pack Size": "15's",
-      "Batch": "PAC129",
-      "Expiry (YYYY-MM)": "2027-10",
-      "MRP": 30.50,
-      "Purchase Price": 18.00,
-      "Quantity": 150,
+      "Qty (Packs)": 10,
+      "Extra Qty": 0,
+      "Unit": "Tablet",
+      "Stock (Base Units)": 1000,
     },
     {
-      "Medicine Name": "Augmentin 625 Duo",
-      "Manufacturer (MFR)": "GSK",
+      "Medicine Name": "DOLO 650",
+      "Supplier": "MEDISAFE PHARMA",
+      "Invoice No": "INV-10928",
+      "Supplier Date": "01/10/2026",
+      "MFR": "MICRO",
+      "Drug Name / Composition": "PARACETAMOL 650MG",
       "Type": "Tablet",
-      "Category": "Antibiotic",
-      "HSN Code": "300410",
+      "HSN": "300490",
+      "Pack": "1x15",
+      "Batch": "DL9901",
+      "Expiry": "2028-03",
+      "MRP": 34.00,
+      "P. Rate": 24.50,
       "GST %": 12,
-      "Pack Size": "10's",
-      "Batch": "AUG881",
-      "Expiry (YYYY-MM)": "2026-12",
-      "MRP": 204.00,
-      "Purchase Price": 145.00,
-      "Quantity": 50,
+      "Qty (Packs)": 5,
+      "Extra Qty": 6,
+      "Unit": "Tablet",
+      "Stock (Base Units)": 81,
     },
     {
-      "Medicine Name": "Pan 40",
-      "Manufacturer (MFR)": "ALKEM",
-      "Type": "Tablet",
-      "Category": "Antacid / PPI",
-      "HSN Code": "300490",
-      "GST %": 5,
-      "Pack Size": "15's",
-      "Batch": "PAN402",
-      "Expiry (YYYY-MM)": "2028-04",
-      "MRP": 155.00,
-      "Purchase Price": 98.00,
-      "Quantity": 80,
-    },
-    {
-      "Medicine Name": "Ascoril LS Syrup",
-      "Manufacturer (MFR)": "GLEN",
+      "Medicine Name": "ASCORIL LS SYRUP",
+      "Supplier": "GLENMARK PHARMA",
+      "Invoice No": "INV-7788",
+      "Supplier Date": "05/10/2026",
+      "MFR": "GLENMARK",
+      "Drug Name / Composition": "LEVOSALBUTAMOL + AMBROXOL",
       "Type": "Syrup",
-      "Category": "Cough / Respiratory",
-      "HSN Code": "300490",
-      "GST %": 12,
-      "Pack Size": "100ml",
+      "HSN": "300490",
+      "Pack": "100ml",
       "Batch": "ASC554",
-      "Expiry (YYYY-MM)": "2027-02",
+      "Expiry": "2027-02",
       "MRP": 118.00,
-      "Purchase Price": 75.00,
-      "Quantity": 30,
+      "P. Rate": 75.00,
+      "GST %": 12,
+      "Qty (Packs)": 1,
+      "Extra Qty": 0,
+      "Unit": "ml",
+      "Stock (Base Units)": 100,
     },
   ];
 
   const ws = XLSX.utils.json_to_sheet(sampleData);
   ws["!cols"] = [
     { wch: 24 }, // Medicine Name
-    { wch: 18 }, // Manufacturer
+    { wch: 20 }, // Supplier
+    { wch: 16 }, // Invoice No
+    { wch: 14 }, // Supplier Date
+    { wch: 16 }, // MFR
+    { wch: 28 }, // Composition
     { wch: 12 }, // Type
-    { wch: 22 }, // Category
-    { wch: 12 }, // HSN Code
-    { wch: 8 },  // GST %
-    { wch: 12 }, // Pack Size
+    { wch: 12 }, // HSN
+    { wch: 12 }, // Pack
     { wch: 14 }, // Batch
-    { wch: 16 }, // Expiry
+    { wch: 12 }, // Expiry
     { wch: 10 }, // MRP
-    { wch: 14 }, // Purchase Price
-    { wch: 10 }, // Quantity
+    { wch: 12 }, // P. Rate
+    { wch: 8 },  // GST
+    { wch: 12 }, // Qty (Packs)
+    { wch: 10 }, // Extra Qty
+    { wch: 10 }, // Unit
+    { wch: 18 }, // Stock
   ];
 
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, "Medicines Template");
-  XLSX.writeFile(wb, "Medicines_Import_Template.xlsx");
+  XLSX.utils.book_append_sheet(wb, ws, "Standardized Template");
+  XLSX.writeFile(wb, "RSP_Medicines_Import_Template.xlsx");
 }
 
-/** Parse an uploaded Excel (.xlsx, .xls) or CSV file with flexible column headers */
+/** Helper to validate and calculate a row's standardized fields */
+function processImportRow(
+  raw: {
+    name: string;
+    supplier?: string;
+    invoiceNo?: string;
+    supplierDate?: string;
+    company?: string;
+    drugName?: string;
+    type?: string;
+    hsn?: string;
+    pack?: string;
+    batch?: string;
+    expiry?: string;
+    mrp: number;
+    cost: number;
+    gst: number;
+    qtyPacks: number;
+    extraQty: number;
+    importedStock?: number;
+    unit?: string;
+    source?: string;
+  },
+  idx: number
+): ParsedImportRow {
+  const errors: string[] = [];
+
+  if (!raw.name.trim()) {
+    errors.push("Medicine Name is missing");
+  }
+  if (!raw.batch?.trim()) {
+    errors.push("Batch is missing");
+  }
+  if (!raw.expiry?.trim()) {
+    errors.push("Expiry is missing or invalid");
+  }
+  if (raw.mrp <= 0) {
+    errors.push("MRP must be greater than ₹0");
+  }
+  if (raw.cost < 0) {
+    errors.push("P. Rate cannot be negative");
+  }
+  if (raw.qtyPacks < 0) {
+    errors.push("Qty (Packs) cannot be negative");
+  }
+  if (raw.extraQty < 0) {
+    errors.push("Extra Qty cannot be negative");
+  }
+
+  // Parse pack configuration and calculate authoritative stock
+  const pInfo = parsePackInfo({
+    pack: raw.pack,
+    unit: raw.unit,
+    type: raw.type,
+  });
+
+  const calculatedStock = calculateStock(raw.qtyPacks, raw.extraQty, pInfo.packSize);
+
+  let stockDiscrepancy = false;
+  if (
+    raw.importedStock !== undefined &&
+    raw.importedStock > 0 &&
+    raw.importedStock !== calculatedStock
+  ) {
+    stockDiscrepancy = true;
+    errors.push(
+      `Conflicting stock: File says ${raw.importedStock}, but calculation (${raw.qtyPacks} packs × ${pInfo.packSize} + ${raw.extraQty} extra) is ${calculatedStock}`
+    );
+  }
+
+  const unitMrp = calculateUnitMrp(raw.mrp, pInfo.packSize);
+  const unitCost = calculateUnitPurchaseRate(raw.cost, pInfo.packSize);
+
+  let checkStatus: "OK" | "WARNING" | "ERROR" = "OK";
+  if (errors.length > 0) {
+    checkStatus = errors.some((e) =>
+      e.includes("missing") || e.includes("must be") || e.includes("cannot be")
+    )
+      ? "ERROR"
+      : "WARNING";
+  }
+
+  return {
+    id: `row-${idx}-${Date.now()}`,
+    name: raw.name.trim(),
+    supplier: raw.supplier?.trim() || "",
+    invoiceNo: raw.invoiceNo?.trim() || "",
+    supplierDate: raw.supplierDate?.trim() || "",
+    company: raw.company?.trim() || "",
+    drugName: raw.drugName?.trim() || "",
+    type: raw.type?.trim() || (pInfo.unitLabel === "ml" ? "Syrup" : "Tablet"),
+    hsn: raw.hsn?.trim() || "",
+    pack: raw.pack?.trim() || pInfo.rawPack || `${pInfo.packSize}'s`,
+    batch: raw.batch?.trim() || "",
+    expiry: raw.expiry?.trim() || "",
+    mrp: raw.mrp,
+    cost: raw.cost,
+    gst: raw.gst,
+    qtyPacks: raw.qtyPacks,
+    extraQty: raw.extraQty,
+    stock: calculatedStock,
+    importedStock: raw.importedStock,
+    stockDiscrepancy,
+    unit: raw.unit?.trim() || pInfo.unitLabel,
+    packSize: pInfo.packSize,
+    unitMrp,
+    unitCost,
+    validationErrors: errors,
+    check: checkStatus,
+    source: raw.source || "Excel",
+  };
+}
+
+/** Parse uploaded Excel (.xlsx, .xls) or CSV file */
 export async function parseMedicineExcelFile(file: File): Promise<ParsedImportRow[]> {
   const buf = await file.arrayBuffer();
   const wb = XLSX.read(buf, { type: "array", cellDates: false });
@@ -258,10 +390,8 @@ export async function parseMedicineExcelFile(file: File): Promise<ParsedImportRo
     throw new Error("No data rows found in the sheet.");
   }
 
-  // Find column mapping by checking keys of first row
   const firstRow = rawRows[0];
   const keys = Object.keys(firstRow);
-
   const cleanKey = (k: string) => k.toLowerCase().replace(/[^a-z0-9]/g, "");
 
   const findKey = (candidates: string[]): string | undefined => {
@@ -272,28 +402,29 @@ export async function parseMedicineExcelFile(file: File): Promise<ParsedImportRo
   };
 
   const nameKey = findKey(["itemname", "medicinename", "productname", "itemdescription", "medicine", "product", "name"]);
-  const supplierKey = findKey(["supplier", "suppliername", "distributor", "party", "wholesaler", "vendor", "agency"]);
-  const invoiceKey = findKey(["invoiceno", "invoice", "billno", "billnumber", "invno", "invoicenumber"]);
+  const supplierKey = findKey(["supplier", "suppliername", "distributor", "party", "wholesaler", "vendor"]);
+  const invoiceKey = findKey(["invoiceno", "invoice", "billno", "invno", "invoicenumber"]);
   const dateKey = findKey(["supplierdate", "invoicedate", "billdate", "date"]);
   const mfrKey = findKey(["manufacturer", "mfr", "company", "mfg", "brand", "make"]);
-  const drugKey = findKey(["drugnames", "drugname", "composition", "drugnamecomposition", "generic", "genericname", "salt", "saltcomposition", "molecule", "contents"]);
-  const typeKey = findKey(["types", "type", "medicinetype", "dosageform", "form"]);
-  const hsnKey = findKey(["hsncode", "hsn", "hsnsac", "sac", "hsnno"]);
-  const gstKey = findKey(["gst", "gstpercent", "taxpercent", "taxrate", "gstslab", "tax"]);
-  const packKey = findKey(["packsize", "pack", "packing", "pkg", "package"]);
-  const batchKey = findKey(["batchno", "batch", "batchnumber", "lot", "lotno"]);
+  const drugKey = findKey(["drugname", "composition", "drugnamecomposition", "generic", "genericname", "salt", "saltcomposition"]);
+  const typeKey = findKey(["type", "types", "medicinetype", "dosageform", "form"]);
+  const hsnKey = findKey(["hsncode", "hsn", "hsnsac", "sac"]);
+  const gstKey = findKey(["gst", "gstpercent", "taxpercent", "taxrate", "tax"]);
+  const packKey = findKey(["pack", "packsize", "packing", "pkg"]);
+  const batchKey = findKey(["batch", "batchno", "batchnumber", "lot"]);
   const expiryKey = findKey(["expiry", "expirydate", "exp", "expdate"]);
-  const mrpKey = findKey(["mrp", "maxretailprice", "retailprice", "price"]);
-  const costKey = findKey(["purchaseprice", "purchaserate", "cost", "prate", "rate", "costprice", "purrate", "newrate", "basicrate"]);
-  const qtyKey = findKey(["quantity", "qty", "stock", "stockqty", "units", "count"]);
-  const unitKey = findKey(["unit", "units", "uom", "sellingunit"]);
+  const mrpKey = findKey(["mrp", "maxretailprice", "retailprice", "packmrp"]);
+  const costKey = findKey(["prate", "purchaseprice", "purchaserate", "cost", "rate", "costprice"]);
+  const qtyPacksKey = findKey(["qtyparks", "qtypacks", "packsqty", "qty", "packs", "quantity"]);
+  const extraQtyKey = findKey(["extraqty", "extra", "looseqty", "loose", "extraunits"]);
+  const stockKey = findKey(["stock", "stockbaseunits", "baseunits", "totalunits", "totalstock"]);
+  const unitKey = findKey(["unit", "units", "uom", "sellingunit", "baseunit"]);
 
   const result: ParsedImportRow[] = [];
 
   for (let i = 0; i < rawRows.length; i++) {
     const row = rawRows[i];
     const name = nameKey ? String(row[nameKey] ?? "").trim() : "";
-    // If there's no name in this row, skip
     if (!name) continue;
 
     const supplier = supplierKey ? String(row[supplierKey] ?? "").trim() : "";
@@ -304,37 +435,44 @@ export async function parseMedicineExcelFile(file: File): Promise<ParsedImportRo
     const type = typeKey ? String(row[typeKey] ?? "").trim() : "";
     const hsn = hsnKey ? normalizeHsnCode(row[hsnKey]) : "";
     const batch = batchKey ? String(row[batchKey] ?? "").trim() : "";
-    const rawExp = expiryKey ? row[expiryKey] : "";
-    const expiry = normalizeExpiryDate(rawExp);
+    const expiry = expiryKey ? normalizeExpiryDate(row[expiryKey]) : "";
 
-    const mrpVal = mrpKey ? Number(String(row[mrpKey]).replace(/[^0-9.]/g, "")) || 0 : 0;
-    const costVal = costKey ? Number(String(row[costKey]).replace(/[^0-9.]/g, "")) || 0 : 0;
-    const gstVal = gstKey ? Number(String(row[gstKey]).replace(/[^0-9.]/g, "")) || 5 : 5;
+    const mrp = mrpKey ? Number(String(row[mrpKey]).replace(/[^0-9.]/g, "")) || 0 : 0;
+    const cost = costKey ? Number(String(row[costKey]).replace(/[^0-9.]/g, "")) || 0 : 0;
+    const gst = gstKey ? Number(String(row[gstKey]).replace(/[^0-9.]/g, "")) || 5 : 5;
     const pack = packKey ? String(row[packKey] ?? "").trim() : "";
-    const stock = qtyKey ? Number(String(row[qtyKey]).replace(/[^0-9.]/g, "")) || 0 : 0;
+
+    const rawQty = qtyPacksKey ? Number(String(row[qtyPacksKey]).replace(/[^0-9.]/g, "")) || 0 : 1;
+    const rawExtra = extraQtyKey ? Number(String(row[extraQtyKey]).replace(/[^0-9.]/g, "")) || 0 : 0;
+    const rawStock = stockKey ? Number(String(row[stockKey]).replace(/[^0-9.]/g, "")) : undefined;
     const unit = unitKey ? String(row[unitKey] ?? "").trim() : "";
 
-    result.push({
-      id: `row-${i}-${Date.now()}`,
-      name,
-      supplier,
-      invoiceNo,
-      supplierDate,
-      company, // Keep short name verbatim
-      drugName, // Drug Name / Composition
-      type,
-      hsn,
-      pack,
-      batch,
-      expiry,
-      mrp: mrpVal,
-      cost: costVal,
-      gst: gstVal,
-      stock,
-      unit: unit || type || "Tablet",
-      check: "OK",
-      source: "Excel",
-    });
+    const processed = processImportRow(
+      {
+        name,
+        supplier,
+        invoiceNo,
+        supplierDate,
+        company,
+        drugName,
+        type,
+        hsn,
+        pack,
+        batch,
+        expiry,
+        mrp,
+        cost,
+        gst,
+        qtyPacks: rawQty,
+        extraQty: rawExtra,
+        importedStock: rawStock,
+        unit,
+        source: "Excel",
+      },
+      i
+    );
+
+    result.push(processed);
   }
 
   return result;
@@ -349,24 +487,17 @@ export function parseMedicinePastedText(rawText: string): ParsedImportRow[] {
 
   if (lines.length === 0) return [];
 
-  // Determine separator (tab or comma or multiple spaces)
   const firstLine = lines[0];
   const isTab = firstLine.includes("\t");
 
   const rows: string[][] = lines.map((line) => {
-    if (isTab) {
-      return line.split("\t").map((c) => c.trim());
-    }
-    if (line.includes(",")) {
-      return line.split(",").map((c) => c.trim());
-    }
-    // Fallback: split by 2 or more spaces
+    if (isTab) return line.split("\t").map((c) => c.trim());
+    if (line.includes(",")) return line.split(",").map((c) => c.trim());
     return line.split(/\s{2,}/).map((c) => c.trim());
   });
 
   if (rows.length === 0) return [];
 
-  // Check if first line is header
   const headerRow = rows[0];
   const cleanHeader = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
   const headers = headerRow.map(cleanHeader);
@@ -377,27 +508,27 @@ export function parseMedicinePastedText(rawText: string): ParsedImportRow[] {
 
   const nameIdx = findIdx(["itemname", "medicinename", "productname", "medicine", "product", "name"]);
   const isHeader = nameIdx !== -1;
-
   const dataRows = isHeader ? rows.slice(1) : rows;
 
   const supplierIdx = isHeader ? findIdx(["supplier", "distributor", "party", "vendor"]) : -1;
   const invIdx = isHeader ? findIdx(["invoiceno", "invoice", "billno", "invno"]) : -1;
   const dateIdx = isHeader ? findIdx(["supplierdate", "invoicedate", "billdate", "date"]) : -1;
-  const mfrIdx = isHeader ? findIdx(["manufacturer", "mfr", "company", "make"]) : 1;
-  const drugIdx = isHeader ? findIdx(["drugnames", "drugname", "composition", "generic", "salt"]) : -1;
-  const typeIdx = isHeader ? findIdx(["types", "type", "dosageform", "form"]) : 2;
+  const mfrIdx = isHeader ? findIdx(["manufacturer", "mfr", "company", "make"]) : -1;
+  const drugIdx = isHeader ? findIdx(["drugname", "composition", "generic", "salt"]) : -1;
+  const typeIdx = isHeader ? findIdx(["type", "types", "dosageform", "form"]) : -1;
   const hsnIdx = isHeader ? findIdx(["hsn", "hsncode", "sac"]) : -1;
   const packIdx = isHeader ? findIdx(["pack", "packsize", "packing"]) : -1;
-  const batchIdx = isHeader ? findIdx(["batchno", "batch", "lot"]) : 3;
+  const batchIdx = isHeader ? findIdx(["batch", "batchno", "lot"]) : -1;
   const expIdx = isHeader ? findIdx(["expiry", "exp", "expdate"]) : -1;
   const mrpIdx = isHeader ? findIdx(["mrp", "retailprice", "price"]) : -1;
-  const costIdx = isHeader ? findIdx(["purchaseprice", "purchaserate", "cost", "rate", "purchase"]) : -1;
+  const costIdx = isHeader ? findIdx(["prate", "purchaseprice", "purchaserate", "cost", "rate"]) : -1;
   const gstIdx = isHeader ? findIdx(["gst", "tax"]) : -1;
-  const qtyIdx = isHeader ? findIdx(["quantity", "qty", "stock"]) : -1;
+  const qtyPacksIdx = isHeader ? findIdx(["qtyparks", "qtypacks", "qty", "packs", "quantity"]) : -1;
+  const extraQtyIdx = isHeader ? findIdx(["extraqty", "extra", "looseqty", "loose"]) : -1;
+  const stockIdx = isHeader ? findIdx(["stock", "stockbaseunits", "baseunits"]) : -1;
   const unitIdx = isHeader ? findIdx(["unit", "units", "uom", "sellingunit"]) : -1;
 
   const actualNameIdx = isHeader ? nameIdx : 0;
-
   const results: ParsedImportRow[] = [];
 
   dataRows.forEach((cols, idx) => {
@@ -418,32 +549,38 @@ export function parseMedicinePastedText(rawText: string): ParsedImportRow[] {
     const mrp = mrpIdx !== -1 ? Number(String(cols[mrpIdx]).replace(/[^0-9.]/g, "")) || 0 : 0;
     const cost = costIdx !== -1 ? Number(String(cols[costIdx]).replace(/[^0-9.]/g, "")) || 0 : 0;
     const gst = gstIdx !== -1 ? Number(String(cols[gstIdx]).replace(/[^0-9.]/g, "")) || 5 : 5;
-    const stock = qtyIdx !== -1 ? Number(String(cols[qtyIdx]).replace(/[^0-9.]/g, "")) || 1 : 1;
+    const rawQty = qtyPacksIdx !== -1 ? Number(String(cols[qtyPacksIdx]).replace(/[^0-9.]/g, "")) || 0 : 1;
+    const rawExtra = extraQtyIdx !== -1 ? Number(String(cols[extraQtyIdx]).replace(/[^0-9.]/g, "")) || 0 : 0;
+    const rawStock = stockIdx !== -1 ? Number(String(cols[stockIdx]).replace(/[^0-9.]/g, "")) : undefined;
     const unit = unitIdx !== -1 ? cols[unitIdx] || "" : "";
 
-    results.push({
-      id: `paste-${idx}-${Date.now()}`,
-      name,
-      supplier,
-      invoiceNo,
-      supplierDate,
-      company,
-      drugName, // Drug Name / Composition
-      type,
-      hsn,
-      pack,
-      batch,
-      expiry,
-      mrp,
-      cost,
-      gst,
-      stock,
-      unit: unit || type || "Tablet",
-      check: "OK",
-      source: "Pasted",
-    });
+    const processed = processImportRow(
+      {
+        name,
+        supplier,
+        invoiceNo,
+        supplierDate,
+        company,
+        drugName,
+        type,
+        hsn,
+        pack,
+        batch,
+        expiry,
+        mrp,
+        cost,
+        gst,
+        qtyPacks: rawQty,
+        extraQty: rawExtra,
+        importedStock: rawStock,
+        unit,
+        source: "Pasted",
+      },
+      idx
+    );
+
+    results.push(processed);
   });
 
   return results;
 }
-

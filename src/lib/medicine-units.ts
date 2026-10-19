@@ -1,61 +1,79 @@
-// ── Medicine Unit & Pack Conversion Utility ──────────────────────────────────
+// ── Medicine Unit & Pack Standardization Utility ─────────────────────────────
 //
-// Handles pack parsing, unit detection (tablets, capsules, syrups, etc.),
-// unit MRP calculation, total base units computation, and stock breakdown display.
+// Shared central calculation engine for:
+// - Pack-to-base-unit conversion (e.g., 10x10 = 100, 1x15 = 15, 10'S = 10, 100ml = 100)
+// - Stock calculation: Stock = (Qty × Units Per Pack) + Extra Qty
+// - Base-unit selling price (Pack MRP ÷ Units Per Pack)
+// - Base-unit purchase rate (Pack Rate ÷ Units Per Pack)
+// - Human-readable stock formatting ("56 Tablets" / "5 Packs + 6 Tablets")
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type PackInfo = {
-  packSize: number;         // e.g. 10 (tablets per strip/pack). Minimum 1.
-  isConvertible: boolean;   // true if tablets/capsules/strips that can be sold loose
-  packLabel: string;        // "Strip" | "Pack" | "Box" | "Bottle" | "Piece"
-  unitLabel: string;        // "Tablet" | "Capsule" | "Piece" | "Unit" | "Bottle"
+  packSize: number;       // Base units per pack (Minimum 1). e.g. 100 for 10x10, 10 for 10's, 15 for 1x15
+  isConvertible: boolean; // True if can be sold in loose base units (tablets, capsules, ml, g, etc.)
+  packLabel: string;      // "Pack" | "Strip" | "Box" | "Bottle" | "Tube" | "Vial" | "Piece"
+  unitLabel: string;      // "Tablet" | "Capsule" | "ml" | "g" | "Vial" | "Bottle" | "Piece" | "Unit"
+  baseUnit: string;       // Alias for unitLabel
+  isAmbiguous?: boolean;  // True if pack string could not be clearly parsed
   rawPack: string;
 };
 
-/**
- * Non-convertible medicine keywords that should NOT be split into loose units
- * even if their pack contains a number like "100ml" or "15g".
- */
-const NON_CONVERTIBLE_TYPES = [
-  "syrup", "suspension", "liquid", "drop", "drops",
-  "cream", "gel", "ointment", "tube", "lotion",
-  "injection", "vial", "ampoule",
-  "inhaler", "spray", "solution", "mouthwash",
-];
+export type MedicinePackInput = {
+  pack?: string | null;
+  unit?: string | null;
+  units?: string | null;
+  type?: string | null;
+};
 
 /**
- * Known solid dose unit types that support pack/strip to unit conversion.
+ * Known solid dose unit types.
  */
 const TABLET_CAPSULE_KEYWORDS = [
   "tab", "tablet", "tablets", "cap", "capsule", "capsules", "strip", "strips", "pills",
 ];
 
 /**
- * Parses pack size and determines if the medicine supports unit-wise (loose) selling.
+ * Liquid / volume based types.
  */
-export function parsePackInfo(m: { pack?: string | null; units?: string | null; type?: string | null }): PackInfo {
+const LIQUID_VOLUME_KEYWORDS = [
+  "syrup", "suspension", "liquid", "drop", "drops", "solution", "mouthwash", "lotion",
+];
+
+/**
+ * Tube / weight based types.
+ */
+const TUBE_WEIGHT_KEYWORDS = [
+  "cream", "gel", "ointment", "tube", "paste",
+];
+
+/**
+ * Parses pack configuration and determines the exact units per pack and base selling unit.
+ * Examples:
+ * - "10x10" -> 100 tablets
+ * - "1x15" -> 15 tablets / capsules
+ * - "10'S" / "10s" -> 10 units
+ * - "100ml" with unit "ml" -> 100 ml
+ * - "15GR" / "25G" with unit "g" -> 15 / 25 grams
+ */
+export function parsePackInfo(
+  input: MedicinePackInput | string,
+  defaultUnit?: string
+): PackInfo {
+  const m: MedicinePackInput =
+    typeof input === "string"
+      ? { pack: input, unit: defaultUnit }
+      : input;
   const rawPack = (m.pack ?? "").trim();
-  const rawUnits = (m.units ?? "").trim();
+  const rawUnit = (m.unit || m.units || defaultUnit || "").trim();
   const rawType = (m.type ?? "").trim().toLowerCase();
-  const combinedType = `${rawType} ${rawUnits.toLowerCase()}`;
+  const combinedContext = `${rawType} ${rawUnit.toLowerCase()} ${rawPack.toLowerCase()}`;
 
-  // 1. Check if definitely non-convertible liquid / tube / vial
-  const isNonConvertibleType = NON_CONVERTIBLE_TYPES.some((t) => combinedType.includes(t));
-  if (isNonConvertibleType && !TABLET_CAPSULE_KEYWORDS.some((t) => rawPack.toLowerCase().includes(t))) {
-    return {
-      packSize: 1,
-      isConvertible: false,
-      packLabel: rawUnits || "Piece",
-      unitLabel: rawUnits || "Piece",
-      rawPack,
-    };
-  }
-
-  // 2. Extract numeric pack size from patterns:
-  // e.g. "1x10", "1*10", "10's", "10s", "10 tab", "10 tablets", "10", "15's", "14"
   let parsedSize = 1;
+  let packLabel = "Pack";
+  let unitLabel = rawUnit || "Unit";
+  let isAmbiguous = false;
 
-  // Pattern A: "1x10" or "2x10" -> last number or multiplied
+  // 1. Check compound pack pattern: "10x10", "10*10", "2x10", "1x15"
   const multiPattern = /(\d+)\s*[xX*]\s*(\d+)/;
   const multiMatch = rawPack.match(multiPattern);
   if (multiMatch) {
@@ -65,99 +83,246 @@ export function parsePackInfo(m: { pack?: string | null; units?: string | null; 
       parsedSize = p1 * p2;
     }
   } else {
-    // Pattern B: "10's", "10s", "10 tab", "10", etc.
-    const numMatch = rawPack.match(/(\d+)/);
-    if (numMatch) {
-      const num = parseInt(numMatch[1], 10);
-      // Avoid treating "100ml" or "500mg" as pack size 100/500 if ml/mg is adjacent
-      const isLiquidVolume = /(ml|gm|mg|l|g)\b/i.test(rawPack);
-      if (!isLiquidVolume && num > 1 && num <= 500) {
-        parsedSize = num;
+    // 2. Check volume pattern: "100ml", "200 ml", "60ml", "10ml"
+    const mlMatch = rawPack.match(/(\d+)\s*ml\b/i);
+    if (mlMatch) {
+      const ml = parseInt(mlMatch[1], 10);
+      if (rawUnit.toLowerCase().includes("ml") || LIQUID_VOLUME_KEYWORDS.some((k) => combinedContext.includes(k))) {
+        parsedSize = ml > 0 ? ml : 1;
+        unitLabel = "ml";
+        packLabel = "Bottle";
+      } else {
+        parsedSize = 1;
+        unitLabel = rawUnit || "Bottle";
+        packLabel = "Pack";
+      }
+    } else {
+      // 3. Check gram / weight pattern: "15GR", "25G", "15gm", "30g"
+      const gramMatch = rawPack.match(/(\d+)\s*(?:g|gm|gr|gram|grams)\b/i);
+      if (gramMatch) {
+        const gm = parseInt(gramMatch[1], 10);
+        if (
+          rawUnit.toLowerCase().includes("g") ||
+          rawUnit.toLowerCase().includes("gram") ||
+          TUBE_WEIGHT_KEYWORDS.some((k) => combinedContext.includes(k))
+        ) {
+          parsedSize = gm > 0 ? gm : 1;
+          unitLabel = "g";
+          packLabel = "Tube";
+        } else {
+          parsedSize = 1;
+          unitLabel = rawUnit || "Tube";
+          packLabel = "Pack";
+        }
+      } else {
+        // 4. Check "10's", "10s", "10 Tab", "15 Caps", "10"
+        const numMatch = rawPack.match(/(\d+)/);
+        if (numMatch) {
+          const num = parseInt(numMatch[1], 10);
+          if (num > 1 && num <= 1000) {
+            parsedSize = num;
+          }
+        }
       }
     }
   }
 
-  // 3. Determine if convertible
-  // Convertible if parsedSize > 1 and it's either tab/cap or default pack format
-  const isTabOrCap = TABLET_CAPSULE_KEYWORDS.some((t) =>
-    combinedType.includes(t) || rawPack.toLowerCase().includes(t)
-  );
-
-  const isConvertible = parsedSize > 1 && (isTabOrCap || !isNonConvertibleType);
-
-  // 4. Derive labels
-  let packLabel = "Strip";
-  let unitLabel = "Tablet";
-
-  const normUnits = rawUnits.toLowerCase().replace(/s+$/, "");
-
-  if (combinedType.includes("cap") || rawPack.toLowerCase().includes("cap")) {
+  // Determine standard unit label and pack label if not already assigned
+  if (rawUnit) {
+    unitLabel = rawUnit;
+  } else if (combinedContext.includes("cap")) {
     unitLabel = "Capsule";
     packLabel = "Strip";
-  } else if (combinedType.includes("tab") || rawPack.toLowerCase().includes("tab")) {
+  } else if (combinedContext.includes("tab")) {
     unitLabel = "Tablet";
     packLabel = "Strip";
-  } else if (normUnits === "strip") {
-    unitLabel = "Tablet";
-    packLabel = "Strip";
-  } else if (rawUnits && normUnits !== "pack") {
-    unitLabel = rawUnits.replace(/s+$/i, "");
+  } else if (LIQUID_VOLUME_KEYWORDS.some((k) => combinedContext.includes(k))) {
+    unitLabel = parsedSize > 1 ? "ml" : "Bottle";
+    packLabel = "Bottle";
+  } else if (TUBE_WEIGHT_KEYWORDS.some((k) => combinedContext.includes(k))) {
+    unitLabel = parsedSize > 1 ? "g" : "Tube";
+    packLabel = "Tube";
+  } else if (combinedContext.includes("inject") || combinedContext.includes("vial")) {
+    unitLabel = "Vial";
     packLabel = "Pack";
-  } else {
-    packLabel = "Pack";
-    unitLabel = "Unit";
   }
 
+  // Adjust pack label for compound packs (e.g., 10x10 is a Box of 100 tablets)
+  if (multiMatch && (unitLabel.toLowerCase().includes("tab") || unitLabel.toLowerCase().includes("cap"))) {
+    packLabel = "Box";
+  } else if (parsedSize > 1 && !multiMatch && (unitLabel.toLowerCase().includes("tab") || unitLabel.toLowerCase().includes("cap"))) {
+    packLabel = "Strip";
+  }
+
+  const isConvertible = parsedSize > 1;
+
   return {
-    packSize: isConvertible ? parsedSize : 1,
+    packSize: Math.max(1, parsedSize),
     isConvertible,
     packLabel,
     unitLabel,
+    baseUnit: unitLabel,
+    isAmbiguous,
     rawPack,
   };
 }
 
 /**
- * Calculates unit MRP with high internal precision.
- * e.g. Pack MRP = 110, Pack Size = 10 -> 11.00
- * e.g. Pack MRP = 99, Pack Size = 10 -> 9.90
+ * Standard authoritative stock formula:
+ * Stock = (Qty × Units Per Pack) + Extra Qty
+ */
+export function calculateStock(qtyPacks: number, extraQty: number, packSize: number): number {
+  const q = Math.max(0, Number(qtyPacks) || 0);
+  const extra = Math.max(0, Number(extraQty) || 0);
+  const size = Math.max(1, Number(packSize) || 1);
+  return q * size + extra;
+}
+
+/**
+ * Alias for backward compatibility with existing codebase
+ */
+export const calculateTotalUnits = calculateStock;
+
+/**
+ * Proportional Base-Unit MRP calculation:
+ * Base-unit price = Pack MRP ÷ Units Per Pack
+ * e.g. Pack = 10, Pack MRP = 100 -> ₹10.00
+ * e.g. Pack = 10x10 (100 units), Pack MRP = 201.56 -> ₹2.0156
  */
 export function calculateUnitMrp(packMrp: number, packSize: number): number {
-  if (!packSize || packSize <= 1) return Number(packMrp) || 0;
-  const unitRate = (Number(packMrp) || 0) / packSize;
-  return Math.round(unitRate * 10000) / 10000;
-}
-
-/**
- * Computes total base units from pack quantity and loose extra units.
- * e.g. 1 strip + 2 tablets (pack size 10) = 12 units
- */
-export function calculateTotalUnits(packQty: number, extraUnits: number, packSize: number): number {
-  const pQty = Math.max(0, Number(packQty) || 0);
-  const eUnits = Math.max(0, Number(extraUnits) || 0);
   const size = Math.max(1, Number(packSize) || 1);
-  return pQty * size + eUnits;
+  const mrp = Math.max(0, Number(packMrp) || 0);
+  if (size <= 1) return mrp;
+  return Math.round((mrp / size) * 10000) / 10000;
 }
 
 /**
- * Formats total base units into human-readable pack + loose unit breakdown.
- * e.g. 67 tablets (pack size 10) -> "6 Strips + 7 Tablets"
- * e.g. 100 tablets (pack size 10) -> "10 Strips"
- * e.g. 8 tablets (pack size 10) -> "8 Tablets"
+ * Proportional Base-Unit Purchase Rate:
+ * Base-unit purchase rate = Pack Purchase Rate ÷ Units Per Pack
  */
-export function formatStockBreakdown(stock: number, packSize: number, packLabel = "Strip", unitLabel = "Tablet"): string {
-  const s = Math.max(0, Number(stock) || 0);
-  if (packSize <= 1) {
-    return `${s} ${unitLabel}`;
-  }
-  const packs = Math.floor(s / packSize);
-  const loose = s % packSize;
+export function calculateUnitPurchaseRate(packRate: number, packSize: number): number {
+  const size = Math.max(1, Number(packSize) || 1);
+  const rate = Math.max(0, Number(packRate) || 0);
+  if (size <= 1) return rate;
+  return Math.round((rate / size) * 10000) / 10000;
+}
 
+/**
+ * Formats total base units into clean primary and breakdown displays:
+ * e.g. 56 tablets (pack size 10) ->
+ * primary: "56 Tablets"
+ * breakdown: "5 Packs + 6 Tablets"
+ */
+export function formatStockDisplay(
+  stock: number,
+  packSize: number,
+  unitLabel: string = "Tablet",
+  packLabel: string = "Pack"
+): { primary: string; breakdown: string; full: string } {
+  const s = Math.max(0, Number(stock) || 0);
+  const size = Math.max(1, Number(packSize) || 1);
+
+  const uName = s === 1 ? unitLabel : `${unitLabel}${unitLabel.endsWith("s") ? "" : "s"}`;
+  const primary = `${s.toLocaleString("en-IN")} ${uName}`;
+
+  if (size <= 1) {
+    return { primary, breakdown: primary, full: primary };
+  }
+
+  const packs = Math.floor(s / size);
+  const loose = s % size;
+  const pName = packs === 1 ? packLabel : `${packLabel}${packLabel.endsWith("s") ? "" : "s"}`;
+  const lName = loose === 1 ? unitLabel : `${unitLabel}${unitLabel.endsWith("s") ? "" : "s"}`;
+
+  let breakdown = "";
   if (packs > 0 && loose > 0) {
-    return `${packs} ${packLabel}${packs > 1 ? "s" : ""} + ${loose} ${unitLabel}${loose > 1 ? "s" : ""}`;
+    breakdown = `${packs} ${pName} + ${loose} ${lName}`;
+  } else if (packs > 0) {
+    breakdown = `${packs} ${pName}`;
+  } else {
+    breakdown = `${loose} ${lName}`;
   }
-  if (packs > 0) {
-    return `${packs} ${packLabel}${packs > 1 ? "s" : ""}`;
+
+  const full = `${primary} (${breakdown})`;
+  return { primary, breakdown, full };
+}
+
+/**
+ * Backward compatibility alias
+ */
+export function formatStockBreakdown(
+  stock: number,
+  packSize: number,
+  packLabel: string = "Strip",
+  unitLabel: string = "Tablet"
+): string {
+  return formatStockDisplay(stock, packSize, unitLabel, packLabel).breakdown;
+}
+
+export type MedicineValuation = {
+  packSize: number;
+  stockUnits: number;
+  packPurchaseRate: number;
+  unitPurchaseRate: number;
+  packMrp: number;
+  unitMrp: number;
+  purchaseValuation: number;       // Math.round(stockUnits * unitPurchaseRate)
+  retailValuation: number;         // Math.round(stockUnits * unitMrp)
+  exactPurchaseValuation: number;   // stockUnits * unitPurchaseRate
+  exactRetailValuation: number;     // stockUnits * unitMrp
+};
+
+/**
+ * Standard central valuation calculator.
+ *
+ * Guaranteed formula:
+ * Purchase Valuation = Stock in Base Units × (Purchase Rate per Pack ÷ Units per Pack)
+ * Retail Valuation = Stock in Base Units × (MRP per Pack ÷ Units per Pack)
+ *
+ * Row-level valuation and summary cards use this exact same formula.
+ */
+export function calculateMedicineValuation(
+  medicine: {
+    stock?: number | null;
+    mrp?: number | null;
+    cost?: number | null;
+    new_rate?: number | null;
+    pack?: string | null;
+    unit?: string | null;
+    units?: string | null;
+    type?: string | null;
+    name?: string | null;
   }
-  return `${loose} ${unitLabel}${loose > 1 ? "s" : ""}`;
+): MedicineValuation {
+  const stockUnits = Math.max(0, Number(medicine.stock) || 0);
+  const pInfo = parsePackInfo(medicine);
+  const packSize = Math.max(1, pInfo.packSize || 1);
+
+  const packMrp = Math.max(0, Number(medicine.mrp) || 0);
+  const packPurchaseRate =
+    medicine.new_rate !== undefined && medicine.new_rate !== null
+      ? Number(medicine.new_rate) || 0
+      : Number(medicine.cost) || 0;
+
+  const unitMrp = packSize > 1 ? packMrp / packSize : packMrp;
+  const unitPurchaseRate = packSize > 1 ? packPurchaseRate / packSize : packPurchaseRate;
+
+  const exactRetailValuation = stockUnits * unitMrp;
+  const exactPurchaseValuation = stockUnits * unitPurchaseRate;
+
+  const retailValuation = Math.round(exactRetailValuation);
+  const purchaseValuation = Math.round(exactPurchaseValuation);
+
+  return {
+    packSize,
+    stockUnits,
+    packPurchaseRate,
+    unitPurchaseRate,
+    packMrp,
+    unitMrp,
+    purchaseValuation,
+    retailValuation,
+    exactPurchaseValuation,
+    exactRetailValuation,
+  };
 }

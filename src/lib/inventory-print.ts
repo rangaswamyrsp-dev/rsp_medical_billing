@@ -1,4 +1,5 @@
 import type { Medicine } from "@/data/medicines";
+import { calculateMedicineValuation } from "./medicine-units";
 
 export interface InventoryPrintOptions {
   storeName: string;
@@ -30,12 +31,16 @@ export function generateInventoryPrintHTML(
   medicines: Medicine[],
   opts: InventoryPrintOptions
 ): string {
-  const totalUnits = medicines.reduce((sum, m) => sum + (Number(m.stock) || 0), 0);
-  const totalMrpValue = medicines.reduce((sum, m) => sum + (Number(m.stock) || 0) * (Number(m.mrp) || 0), 0);
-  const totalCostValue = medicines.reduce((sum, m) => {
-    const rate = m.new_rate !== undefined ? Number(m.new_rate) : (m.cost !== undefined ? Number(m.cost) : 0);
-    return sum + (Number(m.stock) || 0) * rate;
-  }, 0);
+  let totalUnits = 0;
+  let totalMrpValue = 0;
+  let totalCostValue = 0;
+
+  for (const m of medicines) {
+    totalUnits += Number(m.stock) || 0;
+    const v = calculateMedicineValuation(m);
+    totalMrpValue += v.retailValuation;
+    totalCostValue += v.purchaseValuation;
+  }
 
   const filterBadgesHtml = (opts.filtersSummary && opts.filtersSummary.length > 0)
     ? opts.filtersSummary
@@ -44,10 +49,8 @@ export function generateInventoryPrintHTML(
     : `<span class="badge">All Inventory</span>`;
 
   const rows = medicines.map((m, idx) => {
-    const purchaseRate = m.new_rate !== undefined ? Number(m.new_rate) : (m.cost !== undefined ? Number(m.cost) : 0);
-    const stockQty = Number(m.stock) || 0;
-    const mrp = Number(m.mrp) || 0;
-    const itemTotal = stockQty * mrp;
+    const v = calculateMedicineValuation(m);
+    const itemTotal = v.retailValuation;
     const addedDate = m.created_at ? new Date(m.created_at).toLocaleDateString("en-IN") : "—";
 
     return `
@@ -66,9 +69,9 @@ export function generateInventoryPrintHTML(
         <td class="font-mono font-semibold">${escapeHtml(m.batch)}</td>
         <td class="font-mono">${escapeHtml(m.expiry || "—")}</td>
         <td>${escapeHtml(m.pack || "—")}</td>
-        <td class="text-right tabular-nums">${money(purchaseRate)}</td>
-        <td class="text-right tabular-nums font-semibold">${money(mrp)}</td>
-        <td class="text-center tabular-nums font-bold ${stockQty < 20 ? "text-danger" : ""}">${stockQty}</td>
+        <td class="text-right tabular-nums">${money(v.packPurchaseRate)}</td>
+        <td class="text-right tabular-nums font-semibold">${money(v.packMrp)}</td>
+        <td class="text-center tabular-nums font-bold ${v.stockUnits < 20 ? "text-danger" : ""}">${v.stockUnits}</td>
         <td class="text-right tabular-nums font-bold">${money(itemTotal)}</td>
         <td class="text-center subtext">${escapeHtml(addedDate)}</td>
       </tr>

@@ -77,8 +77,20 @@ export async function sb_insertSalaryPayment(
   try {
     const amt = Number(payment.amountPaid ?? payment.amount) || 0;
     const net = Number(payment.netPayable) || amt;
+
+    // Check if payment already exists for this tenant + employee + month
+    const { data: existing } = await supabase
+      .from("salary_payments")
+      .select("id")
+      .eq("tenant_id", tenantId)
+      .eq("employee_id", payment.employeeId)
+      .eq("salary_month", payment.month)
+      .maybeSingle();
+
+    const targetId = existing?.id || payment.id;
+
     const row: DbSalaryPaymentRow = {
-      id: payment.id,
+      id: targetId,
       tenant_id: tenantId,
       employee_id: payment.employeeId,
       employee_name: payment.employeeName || payment.employeeId,
@@ -93,8 +105,26 @@ export async function sb_insertSalaryPayment(
       updated_at: new Date().toISOString(),
     };
 
-    const { error } = await supabase.from("salary_payments").upsert(row, { onConflict: "id" });
-    return { error: error ? error.message : null };
+    if (existing?.id) {
+      const { error } = await supabase
+        .from("salary_payments")
+        .update({
+          employee_name: row.employee_name,
+          net_payable: row.net_payable,
+          amount_paid: row.amount_paid,
+          payment_date: row.payment_date,
+          payment_mode: row.payment_mode,
+          status: row.status,
+          notes: row.notes,
+          updated_at: row.updated_at,
+        })
+        .eq("id", existing.id)
+        .eq("tenant_id", tenantId);
+      return { error: error ? error.message : null };
+    } else {
+      const { error } = await supabase.from("salary_payments").insert(row);
+      return { error: error ? error.message : null };
+    }
   } catch (err: any) {
     return { error: err?.message ?? String(err) };
   }

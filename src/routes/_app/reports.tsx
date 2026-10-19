@@ -25,22 +25,54 @@ export const Route = createFileRoute("/_app/reports")({
   component: ReportsPage,
 });
 
-type Preset = "today" | "week" | "month" | "3m" | "6m" | "1y" | "custom";
+type Preset = "today" | "yesterday" | "week" | "month" | "3m" | "6m" | "1y" | "custom";
 
-function startForPreset(p: Preset, customFrom?: string): Date {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  if (p === "today") return d;
-  if (p === "week") { d.setDate(d.getDate() - 6); return d; }
-  if (p === "month") return new Date(d.getFullYear(), d.getMonth(), 1, 0, 0, 0, 0);
-  if (p === "3m") { d.setMonth(d.getMonth() - 3); return d; }
-  if (p === "6m") { d.setMonth(d.getMonth() - 6); return d; }
-  if (p === "1y") { d.setFullYear(d.getFullYear() - 1); return d; }
-  if (customFrom) {
-    const cd = new Date(customFrom + "T00:00:00");
-    if (!isNaN(cd.getTime())) return cd;
+function getRangeForPreset(p: Preset, customFrom?: string, customTo?: string): { start: Date; end: Date } {
+  const now = new Date();
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const end = new Date();
+  end.setHours(23, 59, 59, 999);
+
+  if (p === "today") {
+    return { start, end };
   }
-  return d;
+  if (p === "yesterday") {
+    const y = new Date(now);
+    y.setDate(y.getDate() - 1);
+    y.setHours(0, 0, 0, 0);
+    const yEnd = new Date(y);
+    yEnd.setHours(23, 59, 59, 999);
+    return { start: y, end: yEnd };
+  }
+  if (p === "week") {
+    start.setDate(start.getDate() - 6);
+    return { start, end };
+  }
+  if (p === "month") {
+    return { start: new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0), end };
+  }
+  if (p === "3m") {
+    start.setMonth(start.getMonth() - 3);
+    return { start, end };
+  }
+  if (p === "6m") {
+    start.setMonth(start.getMonth() - 6);
+    return { start, end };
+  }
+  if (p === "1y") {
+    start.setFullYear(start.getFullYear() - 1);
+    return { start, end };
+  }
+  if (p === "custom") {
+    const s = customFrom ? new Date(customFrom + "T00:00:00") : start;
+    const e = customTo ? new Date(customTo + "T23:59:59.999") : end;
+    return {
+      start: isNaN(s.getTime()) ? start : s,
+      end: isNaN(e.getTime()) ? end : e,
+    };
+  }
+  return { start, end };
 }
 
 function isDateInRange(dateStr: string | undefined | null, start: Date, end: Date): boolean {
@@ -64,6 +96,7 @@ function ReportsPage() {
   const customers = useStore((s) => s.customers);
 
   const [dbLoans, setDbLoans] = useState<DbLoan[]>([]);
+  const [medicineQuery, setMedicineQuery] = useState("");
 
   useEffect(() => {
     actions.syncSales().catch(() => {});
@@ -84,14 +117,7 @@ function ReportsPage() {
   const [to, setTo] = useState<string>(new Date().toISOString().slice(0, 10));
 
   const range = useMemo(() => {
-    const start = startForPreset(preset, from);
-    const end = new Date();
-    end.setHours(23, 59, 59, 999);
-    if (preset === "custom") {
-      const ed = new Date(to + "T23:59:59.999");
-      if (!isNaN(ed.getTime())) end.setTime(ed.getTime());
-    }
-    return { start, end };
+    return getRangeForPreset(preset, from, to);
   }, [preset, from, to]);
 
   // Valid sales in range (exclude cancelled and held)
@@ -167,7 +193,8 @@ function ReportsPage() {
         let sCost = 0;
         if (s.items && s.items.length > 0) {
           s.items.forEach((it) => {
-            const uCost = medicineCostMap.get(it.name.trim().toLowerCase()) ?? (it.mrp ? it.mrp * 0.75 : 0);
+            const medName = it.name || (it as any).medicineName || "";
+            const uCost = medicineCostMap.get(medName.trim().toLowerCase()) ?? (it.mrp ? it.mrp * 0.75 : 0);
             sCost += Math.round(uCost * (Number(it.qty) || 1));
           });
         } else {
@@ -185,7 +212,7 @@ function ReportsPage() {
     }));
   }, [inRange, range, medicineCostMap]);
 
-  // Payment breakdown separated into Cash, Online / UPI, and Credit / Loan (avoiding double counting)
+  // Payment breakdown separated into CASH, ONLINE, and CREDIT / LOAN (zero double counting)
   const payments = useMemo(() => {
     let cashTotal = 0;
     let onlineTotal = 0;
@@ -206,7 +233,7 @@ function ReportsPage() {
 
     const list: { name: string; value: number }[] = [];
     if (cashTotal > 0) list.push({ name: "CASH", value: Math.round(cashTotal) });
-    if (onlineTotal > 0) list.push({ name: "ONLINE / UPI", value: Math.round(onlineTotal) });
+    if (onlineTotal > 0) list.push({ name: "ONLINE", value: Math.round(onlineTotal) });
     if (creditTotal > 0) list.push({ name: "CREDIT / LOAN", value: Math.round(creditTotal) });
     if (otherTotal > 0) list.push({ name: "OTHER", value: Math.round(otherTotal) });
 
@@ -232,18 +259,36 @@ function ReportsPage() {
     }));
   }, [sales]);
 
+  // STEP 16 & 17 — Top selling medicines aggregated by quantity sold
   const topItems = useMemo(() => {
-    const map = new Map<string, { qty: number; revenue: number }>();
+    const map = new Map<string, { name: string; qty: number; revenue: number; invoiceIds: Set<string> }>();
+
     inRange.forEach((s) => {
       (s.items || []).forEach((it) => {
-        const cur = map.get(it.name) ?? { qty: 0, revenue: 0 };
+        const medName = (it.name || (it as any).medicineName || "Unknown").trim();
+        const cur = map.get(medName) ?? { name: medName, qty: 0, revenue: 0, invoiceIds: new Set<string>() };
         cur.qty += Number(it.qty) || 0;
         cur.revenue += Number(it.total) || 0;
-        map.set(it.name, cur);
+        cur.invoiceIds.add(s.id);
+        map.set(medName, cur);
       });
     });
-    return Array.from(map, ([name, v]) => ({ name, ...v })).sort((a, b) => b.revenue - a.revenue).slice(0, 10);
-  }, [inRange]);
+
+    let list = Array.from(map.values()).map((item) => ({
+      name: item.name,
+      qty: item.qty,
+      revenue: Math.round(item.revenue),
+      invoicesCount: item.invoiceIds.size,
+    }));
+
+    if (medicineQuery.trim()) {
+      const mq = medicineQuery.toLowerCase().trim();
+      list = list.filter((it) => it.name.toLowerCase().includes(mq));
+    }
+
+    // Rank by quantity sold as required by STEP 17
+    return list.sort((a, b) => b.qty - a.qty);
+  }, [inRange, medicineQuery]);
 
   const totalRev = inRange.reduce((n, s) => n + (Number(s.grand) || 0), 0);
   const totalBills = inRange.length;
@@ -286,7 +331,8 @@ function ReportsPage() {
     inRange.forEach((s) => {
       if (s.items && s.items.length > 0) {
         s.items.forEach((it) => {
-          const uCost = medicineCostMap.get(it.name.trim().toLowerCase()) ?? (it.mrp ? it.mrp * 0.75 : 0);
+          const medName = it.name || (it as any).medicineName || "";
+          const uCost = medicineCostMap.get(medName.trim().toLowerCase()) ?? (it.mrp ? it.mrp * 0.75 : 0);
           cost += Math.round(uCost * (Number(it.qty) || 1));
         });
       } else {
@@ -301,7 +347,6 @@ function ReportsPage() {
   const COLORS = ["#22C55E", "#2563EB", "#F59E0B", "#EF4444", "#8B5CF6", "#06B6D4", "#F97316"];
   const PAYMENT_COLORS: Record<string, string> = {
     "CASH": "#22C55E",
-    "ONLINE / UPI": "#2563EB",
     "ONLINE": "#2563EB",
     "CREDIT / LOAN": "#F59E0B",
     "CREDIT": "#F59E0B",
@@ -314,22 +359,23 @@ function ReportsPage() {
         <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
           <BarChart3 className="h-6 w-6 text-primary" /> Reports
         </h1>
-        <p className="text-sm text-muted-foreground">Sales, payment mix, daily profit and top medicines.</p>
+        <p className="text-sm text-muted-foreground">Sales, payment mix, daily profit and top-selling medicines.</p>
       </div>
 
       <Card className="p-4 flex flex-wrap items-end gap-3">
         <div className="space-y-1.5">
-          <Label className="text-xs">Range</Label>
+          <Label className="text-xs">Period Range</Label>
           <Select value={preset} onValueChange={(v) => setPreset(v as Preset)}>
             <SelectTrigger className="w-48"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="today">Today</SelectItem>
-              <SelectItem value="week">Last 7 days</SelectItem>
-              <SelectItem value="month">This month</SelectItem>
-              <SelectItem value="3m">Last 3 months</SelectItem>
-              <SelectItem value="6m">Last 6 months</SelectItem>
-              <SelectItem value="1y">Last 1 year</SelectItem>
-              <SelectItem value="custom">Custom range</SelectItem>
+              <SelectItem value="yesterday">Yesterday</SelectItem>
+              <SelectItem value="week">This Week (Last 7 Days)</SelectItem>
+              <SelectItem value="month">This Month</SelectItem>
+              <SelectItem value="3m">Last 3 Months</SelectItem>
+              <SelectItem value="6m">Last 6 Months</SelectItem>
+              <SelectItem value="1y">Last 1 Year</SelectItem>
+              <SelectItem value="custom">Custom Date Range</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -423,29 +469,64 @@ function ReportsPage() {
         </div>
       </Card>
 
-      <Card className="p-5">
-        <div className="font-semibold mb-3">Top selling medicines · in range</div>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Medicine</TableHead>
-              <TableHead className="text-center">Units sold</TableHead>
-              <TableHead className="text-right">Revenue</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {topItems.map((t) => (
-              <TableRow key={t.name}>
-                <TableCell className="font-medium">{t.name}</TableCell>
-                <TableCell className="text-center">{t.qty}</TableCell>
-                <TableCell className="text-right tabular-nums">₹{t.revenue.toLocaleString("en-IN")}</TableCell>
-              </TableRow>
-            ))}
-            {topItems.length === 0 && (
-              <TableRow><TableCell colSpan={3} className="text-center py-8 text-muted-foreground">No sales in this range.</TableCell></TableRow>
+      {/* Top-Selling Medicines Report */}
+      <Card className="p-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="font-semibold text-lg">Top-Selling Medicines</div>
+            <p className="text-xs text-muted-foreground">
+              Ranked by quantity sold from completed sales in the selected period (
+              {range.start.toLocaleDateString("en-IN")} → {range.end.toLocaleDateString("en-IN")})
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Input
+              className="h-8 text-xs w-48"
+              placeholder="Filter by medicine…"
+              value={medicineQuery}
+              onChange={(e) => setMedicineQuery(e.target.value)}
+            />
+            {medicineQuery && (
+              <Button size="sm" variant="ghost" className="h-8 text-xs" onClick={() => setMedicineQuery("")}>
+                Clear
+              </Button>
             )}
-          </TableBody>
-        </Table>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-16">Rank</TableHead>
+                <TableHead>Medicine Name</TableHead>
+                <TableHead className="text-center">Quantity Sold</TableHead>
+                <TableHead className="text-center">No. of Invoices</TableHead>
+                <TableHead className="text-right">Sales Amount</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {topItems.map((t, idx) => (
+                <TableRow key={t.name}>
+                  <TableCell className="font-semibold text-xs text-muted-foreground">
+                    #{idx + 1}
+                  </TableCell>
+                  <TableCell className="font-medium text-sm">{t.name}</TableCell>
+                  <TableCell className="text-center font-semibold text-primary">{t.qty}</TableCell>
+                  <TableCell className="text-center text-muted-foreground text-xs">{t.invoicesCount}</TableCell>
+                  <TableCell className="text-right tabular-nums font-semibold">₹{t.revenue.toLocaleString("en-IN")}</TableCell>
+                </TableRow>
+              ))}
+              {topItems.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={5} className="text-center py-10 text-muted-foreground">
+                    No sales found for the selected period.
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </div>
 
         <div className="mt-4 pt-3 border-t grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
           <div>

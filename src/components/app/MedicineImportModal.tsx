@@ -37,7 +37,10 @@ import {
   type ParsedImportRow,
 } from "@/lib/inventory-excel";
 import { extractMedicinesFromImageEdgeFn } from "@/lib/vision.functions";
+import { parsePackInfo, calculateStock, formatStockDisplay } from "@/lib/medicine-units";
+import { calculatePurchaseInvoiceTotals } from "@/lib/purchase-calc";
 import { supabase } from "@/lib/supabase";
+import { detectDuplicates, normaliseMedName, normalizeMedName, findMatchingMedicine } from "@/lib/medicines-supabase";
 import { toast } from "sonner";
 
 export interface MedicineImportModalProps {
@@ -201,47 +204,50 @@ export function MedicineImportModal({
 
   // ── Multiple Invoice Grouping Logic ─────────────────────────────────────────
   // Groups incoming rows by Supplier + Invoice No + Supplier Date
-  const groupRowsIntoInvoices = (newRows: ParsedImportRow[]) => {
-    setInvoiceGroups((prevGroups) => {
-      const updatedGroups = [...prevGroups];
-      const newlyAddedExtendedRows: ExtendedImportRow[] = [];
+  const groupRowsIntoInvoices = (newRows: ParsedImportRow[], replace = false) => {
+    const baseGroups = replace ? [] : [...invoiceGroups];
+    const updatedGroups = [...baseGroups];
+    const newlyAddedExtendedRows: ExtendedImportRow[] = [];
 
-      newRows.forEach((r) => {
-        const supKey = (r.supplier || "").trim();
-        const invKey = (r.invoiceNo || "").trim();
-        const dtKey = (r.supplierDate || "").trim();
+    newRows.forEach((r) => {
+      const supKey = (r.supplier || "").trim();
+      const invKey = (r.invoiceNo || "").trim();
+      const dtKey = (r.supplierDate || "").trim();
 
-        // Match against existing group
-        let matchedGroup = updatedGroups.find(
-          (g) =>
-            ((!g.supplier && !supKey) || g.supplier.toLowerCase() === supKey.toLowerCase()) &&
-            ((!g.invoiceNo && !invKey) || g.invoiceNo.toLowerCase() === invKey.toLowerCase())
-        );
+      // Match against existing group
+      let matchedGroup = updatedGroups.find(
+        (g) =>
+          ((!g.supplier && !supKey) || g.supplier.toLowerCase() === supKey.toLowerCase()) &&
+          ((!g.invoiceNo && !invKey) || g.invoiceNo.toLowerCase() === invKey.toLowerCase())
+      );
 
-        if (!matchedGroup) {
-          const newGroupId = `inv-grp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-          matchedGroup = {
-            id: newGroupId,
-            supplier: supKey,
-            invoiceNo: invKey,
-            supplierDate: dtKey || new Date().toLocaleDateString("en-GB"),
-            isLocked: Boolean(supKey || invKey),
-          };
-          updatedGroups.push(matchedGroup);
-        }
+      if (!matchedGroup) {
+        const newGroupId = `inv-grp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        matchedGroup = {
+          id: newGroupId,
+          supplier: supKey,
+          invoiceNo: invKey,
+          supplierDate: dtKey || new Date().toLocaleDateString("en-GB"),
+          isLocked: Boolean(supKey || invKey),
+        };
+        updatedGroups.push(matchedGroup);
+      }
 
-        newlyAddedExtendedRows.push({
-          ...r,
-          invoiceGroupId: matchedGroup.id,
-          supplier: matchedGroup.supplier,
-          invoiceNo: matchedGroup.invoiceNo,
-          supplierDate: matchedGroup.supplierDate,
-        });
+      newlyAddedExtendedRows.push({
+        ...r,
+        invoiceGroupId: matchedGroup.id,
+        supplier: matchedGroup.supplier,
+        invoiceNo: matchedGroup.invoiceNo,
+        supplierDate: matchedGroup.supplierDate,
       });
-
-      setRows((prevRows) => [...prevRows, ...newlyAddedExtendedRows]);
-      return updatedGroups;
     });
+
+    setInvoiceGroups(updatedGroups);
+    if (replace) {
+      setRows(newlyAddedExtendedRows);
+    } else {
+      setRows((prevRows) => [...prevRows, ...newlyAddedExtendedRows]);
+    }
   };
 
   // Update Group Header fields
@@ -331,6 +337,11 @@ export function MedicineImportModal({
         invoices.forEach((inv) => {
           (inv.items || []).forEach((m, mIdx) => {
             totalItemsInPhoto++;
+            const packStr = (m.pack || "10's").trim();
+            const packInfo = parsePackInfo(packStr, m.unit || m.type);
+            const qtyPacks = Number(m.quantity) || 1;
+            const extraQty = 0;
+            const calculatedStock = calculateStock(qtyPacks, extraQty, packInfo.packSize);
             newExtractedRows.push({
               id: `scan-${i}-${mIdx}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
               name: m.medicine_name,
@@ -341,15 +352,18 @@ export function MedicineImportModal({
               drugName: m.drug_name || "", // Drug Name / Composition
               type: m.type || "Tablet",
               hsn: normalizeHsnCode(m.hsn || ""),
-              pack: m.pack || "10's",
+              pack: packStr,
               batch: m.batch || "",
               expiry: normalizeExpiryDate(m.expiry || ""),
               mrp: m.mrp || 0,
               cost: m.purchase_price || 0,
               gst: m.gst ?? 5,
-              stock: m.quantity || 1,
-              unit: m.unit || m.type || "Tablet",
-              check: "AI",
+              qtyPacks,
+              extraQty,
+              stock: calculatedStock,
+              unit: m.unit || packInfo.baseUnit || "Tablet",
+              packSize: packInfo.packSize,
+              check: packInfo.isAmbiguous ? "Check Pack" : "AI",
               source: imgItem.file.name,
             });
           });
@@ -390,7 +404,7 @@ export function MedicineImportModal({
   const handleExcelUpload = async (file: File) => {
     try {
       const parsed = await parseMedicineExcelFile(file);
-      groupRowsIntoInvoices(parsed);
+      groupRowsIntoInvoices(parsed, true);
       toast.success(`✓ Loaded ${parsed.length} row(s) from ${file.name}`);
     } catch (err: any) {
       toast.error(err?.message || "Could not read Excel/CSV file");
@@ -405,7 +419,7 @@ export function MedicineImportModal({
     if (parsed.length === 0) {
       return toast.error("Could not parse rows. Check tab or space separation.");
     }
-    groupRowsIntoInvoices(parsed);
+    groupRowsIntoInvoices(parsed, true);
     toast.success(`✓ Loaded ${parsed.length} row(s) from pasted text`);
   };
 
@@ -417,7 +431,27 @@ export function MedicineImportModal({
   // ── Row Editing ────────────────────────────────────────────────────────────
   const updateRow = (id: string, patch: Partial<ExtendedImportRow>) => {
     setRows((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, ...patch } : r))
+      prev.map((r) => {
+        if (r.id !== id) return r;
+        const merged = { ...r, ...patch };
+        if (
+          patch.pack !== undefined ||
+          patch.unit !== undefined ||
+          patch.type !== undefined ||
+          patch.qtyPacks !== undefined ||
+          patch.extraQty !== undefined
+        ) {
+          const info = parsePackInfo(merged.pack, merged.unit || merged.type);
+          merged.packSize = info.packSize;
+          if (!merged.unit || patch.unit === undefined) {
+            merged.unit = info.baseUnit;
+          }
+          const qP = Math.max(0, Number(merged.qtyPacks ?? 1) || 0);
+          const eQ = Math.max(0, Number(merged.extraQty ?? 0) || 0);
+          merged.stock = calculateStock(qP, eQ, info.packSize);
+        }
+        return merged;
+      })
     );
   };
 
@@ -427,6 +461,7 @@ export function MedicineImportModal({
 
   const addBlankRowToGroup = (groupId: string) => {
     const group = invoiceGroups.find((g) => g.id === groupId);
+    const info = parsePackInfo("10x10", "Tablet");
     const blank: ExtendedImportRow = {
       id: `manual-${Date.now()}`,
       invoiceGroupId: groupId,
@@ -438,13 +473,16 @@ export function MedicineImportModal({
       drugName: "", // Drug Name / Composition
       type: "Tablet",
       hsn: "",
-      pack: "10's",
+      pack: "10x10",
       batch: "",
       expiry: "",
       mrp: 0,
       cost: 0,
       gst: 5,
-      stock: 1,
+      qtyPacks: 1,
+      extraQty: 0,
+      packSize: info.packSize,
+      stock: calculateStock(1, 0, info.packSize),
       unit: "Tablet",
       check: "OK",
     };
@@ -464,60 +502,32 @@ export function MedicineImportModal({
     addBlankRowToGroup(newGroupId);
   };
 
-  // ── Medicine Lookup Priority ───────────────────────────────────────────────
-  // 1. Medicine ID/code
-  // 2. Exact medicine name + batch
-  // 3. Exact medicine name + manufacturer
-  // 4. Exact medicine name
-  const matchMedicine = (row: ExtendedImportRow) => {
-    const rowName = (row.name || "").trim().toLowerCase();
-    const rowMfr = (row.company || "").trim().toLowerCase();
-    const rowBatch = (row.batch || "").trim().toLowerCase();
-
-    if (!rowName) return null;
-
-    // 1. Code / ID match
-    if (row.id && existingMedicines.some((m) => m.id === row.id || (m.code && m.code === row.id))) {
-      const match = existingMedicines.find((m) => m.id === row.id || (m.code && m.code === row.id))!;
-      return { med: match, type: "code" as const };
-    }
-
-    // 2. Exact medicine name + batch
-    if (rowBatch) {
-      const match = existingMedicines.find(
-        (m) =>
-          m.name.trim().toLowerCase() === rowName &&
-          m.batch.trim().toLowerCase() === rowBatch
-      );
-      if (match) return { med: match, type: "name-batch" as const };
-    }
-
-    // 3. Exact medicine name + manufacturer
-    if (rowMfr) {
-      const match = existingMedicines.find(
-        (m) =>
-          m.name.trim().toLowerCase() === rowName &&
-          (m.company || "").trim().toLowerCase() === rowMfr
-      );
-      if (match) return { med: match, type: "name-mfr" as const };
-    }
-
-    // 4. Exact medicine name
-    const match = existingMedicines.find(
-      (m) => m.name.trim().toLowerCase() === rowName
+  // ── Medicine Duplicate Detection ───────────────────────────────────────────
+  // Runs detectDuplicates for all rows against the current medicine master.
+  // Returns per-row status: "existing" | "review" | "new"
+  const duplicateResults = useMemo(() => {
+    return detectDuplicates(
+      rows.map((r) => ({ name: r.name, company: r.company, generic: r.drugName })),
+      existingMedicines,
     );
-    if (match) return { med: match, type: "exact-name" as const };
+  }, [rows, existingMedicines]);
 
-    return null;
+  // Helper: get duplicate result for a specific row (by position in rows array)
+  const getDuplicateResult = (rowId: string) => {
+    const idx = rows.findIndex((r) => r.id === rowId);
+    return idx >= 0 ? duplicateResults[idx] : { status: "new" as const };
   };
 
   // Overall Totals
   const totalMedicineLines = rows.length;
   const totalUnits = rows.reduce((sum, r) => sum + (Number(r.stock) || 0), 0);
-  const totalPurchaseAmount = rows.reduce(
-    (sum, r) => sum + (Number(r.stock) || 0) * (Number(r.cost) || 0),
-    0
-  );
+  const totalPurchaseAmount = rows.reduce((sum, r) => {
+    const pSize = r.packSize || 1;
+    const cost = Number(r.cost) || 0;
+    const qPacks = r.qtyPacks !== undefined ? Number(r.qtyPacks) || 0 : (pSize > 1 ? (Number(r.stock) || 0) / pSize : (Number(r.stock) || 0));
+    const extra = Number(r.extraQty) || 0;
+    return sum + (qPacks * cost) + (extra * (cost / pSize));
+  }, 0);
 
   // ── Confirm & Add to Inventory / Medicines / Purchases ────────────────────
   const confirmAndAdd = async () => {
@@ -563,61 +573,100 @@ export function MedicineImportModal({
           }
         }
 
-        // 2. Identify new vs existing medicines in Medicine Master
+        // 2. Identify new vs existing medicines in Medicine Master using normalised name matching
         const latestMedicines = useStore.getState().medicines;
         const newItemsToCreate: Omit<Medicine, "id">[] = [];
 
         groupRows.forEach((r) => {
-          const existing = latestMedicines.find(
-            (m: Medicine) =>
-              m.name.trim().toLowerCase() === r.name.trim().toLowerCase() &&
-              m.batch.trim().toLowerCase() === r.batch.trim().toLowerCase()
+          const normRowName = normalizeMedName(r.name);
+          // 1. Check if the product exists using normalized name, strength, and composition
+          const existingProduct = findMatchingMedicine(
+            { name: r.name, generic: r.drugName, company: r.company },
+            latestMedicines,
           );
 
           const mrp = Number(r.mrp) || 0;
           const cost = Number(r.cost) || 0;
           const profit = Math.max(0, mrp - cost);
 
-          if (!existing) {
+          if (!existingProduct) {
+            // Completely new medicine: create new record with new Medicine ID
             const alreadyInQueue = newItemsToCreate.find(
-              (m) =>
-                m.name.trim().toLowerCase() === r.name.trim().toLowerCase() &&
-                m.batch.trim().toLowerCase() === r.batch.trim().toLowerCase()
+              (m) => normalizeMedName(m.name) === normRowName
             );
             if (!alreadyInQueue) {
               newItemsToCreate.push({
-              name: r.name.trim(),
-              company: r.company.trim() || undefined,
-              generic: r.drugName.trim() || undefined, // Drug Name / Composition stored in generic
-              type: r.type.trim() || undefined,
-              units: r.unit?.trim() || r.type?.trim() || undefined,
-              hsn: r.hsn.trim() || undefined,
-              pack: r.pack.trim() || undefined,
-              batch: r.batch.trim(),
-              expiry: r.expiry.trim() || "2027-12",
-              mrp,
-              cost,
-              new_rate: cost || undefined,
-              profit,
-              gst: Number(r.gst) || 5,
-              stock: finalSupplier && finalInvoiceNo ? 0 : Number(r.stock) || 0, // Stock will be added by addPurchase
-              supplier: finalSupplier || undefined,
-              supplierId: resolvedSupplierId,
-            });
-          }
+                name: r.name.trim(),
+                company: r.company.trim() || undefined,
+                generic: r.drugName.trim() || undefined,
+                type: r.type.trim() || undefined,
+                units: r.unit?.trim() || r.type?.trim() || undefined,
+                hsn: r.hsn.trim() || undefined,
+                pack: r.pack.trim() || undefined,
+                batch: r.batch.trim(),
+                expiry: r.expiry.trim() || "2027-12",
+                mrp,
+                cost,
+                new_rate: cost || undefined,
+                profit,
+                gst: Number(r.gst) || 5,
+                stock: finalSupplier && finalInvoiceNo ? 0 : Number(r.stock) || 0,
+                supplier: finalSupplier || undefined,
+                supplierId: resolvedSupplierId,
+              });
+            }
           } else {
-            // Update existing medicine metadata without resetting stock
-            actions.updateMedicine(existing.id, {
-              mrp: mrp || existing.mrp,
-              generic: r.drugName.trim() || existing.generic,
-              hsn: r.hsn.trim() || existing.hsn,
-              pack: r.pack.trim() || existing.pack,
-              units: r.unit?.trim() || existing.units,
-              type: r.type.trim() || existing.type,
-              company: r.company.trim() || existing.company,
-              supplier: finalSupplier || existing.supplier,
-              supplierId: resolvedSupplierId || existing.supplierId,
-            });
+            // Existing product found!
+            // Check if this exact batch already exists
+            const exactBatch = latestMedicines.find(
+              (m: Medicine) =>
+                normalizeMedName(m.name) === normRowName &&
+                m.batch.trim().toLowerCase() === r.batch.trim().toLowerCase()
+            );
+
+            if (exactBatch) {
+              // Same batch exists: update metadata/rates
+              actions.updateMedicine(exactBatch.id, {
+                mrp: mrp || exactBatch.mrp,
+                generic: r.drugName.trim() || exactBatch.generic,
+                hsn: r.hsn.trim() || exactBatch.hsn,
+                pack: r.pack.trim() || exactBatch.pack,
+                units: r.unit?.trim() || exactBatch.units,
+                type: r.type.trim() || exactBatch.type,
+                company: r.company.trim() || exactBatch.company,
+                supplier: finalSupplier || exactBatch.supplier,
+                supplierId: resolvedSupplierId || exactBatch.supplierId,
+              });
+            } else {
+              // New batch of existing product: retain Medicine ID (code) and create separate batch record!
+              const alreadyInQueue = newItemsToCreate.find(
+                (m) =>
+                  normalizeMedName(m.name) === normRowName &&
+                  m.batch.trim().toLowerCase() === r.batch.trim().toLowerCase()
+              );
+              if (!alreadyInQueue) {
+                newItemsToCreate.push({
+                  name: r.name.trim(),
+                  code: existingProduct.code, // Reuse existing Medicine ID!
+                  company: r.company.trim() || existingProduct.company || undefined,
+                  generic: r.drugName.trim() || existingProduct.generic || undefined,
+                  type: r.type.trim() || existingProduct.type || undefined,
+                  units: r.unit?.trim() || existingProduct.units || undefined,
+                  hsn: r.hsn.trim() || existingProduct.hsn || undefined,
+                  pack: r.pack.trim() || existingProduct.pack || undefined,
+                  batch: r.batch.trim(),
+                  expiry: r.expiry.trim() || "2027-12",
+                  mrp,
+                  cost,
+                  new_rate: cost || undefined,
+                  profit,
+                  gst: Number(r.gst) || 5,
+                  stock: finalSupplier && finalInvoiceNo ? 0 : Number(r.stock) || 0,
+                  supplier: finalSupplier || undefined,
+                  supplierId: resolvedSupplierId,
+                });
+              }
+            }
           }
         });
 
@@ -633,18 +682,26 @@ export function MedicineImportModal({
 
         // 3. Purchase Integration: Create purchase record in public.purchases and public.purchase_items
         if (finalSupplier && finalInvoiceNo) {
-          const purchaseItems = groupRows.map((r) => ({
-            name: r.name.trim(),
-            batch: r.batch.trim(),
-            qty: Number(r.stock) || 1,
-            rate: Number(r.cost) || 0,
-            gst: Number(r.gst) || 5,
-          }));
+          const purchaseItems = groupRows.map((r) => {
+            const pSize = r.packSize || 1;
+            const qPacks = r.qtyPacks !== undefined ? Number(r.qtyPacks) || 0 : (pSize > 1 ? Math.floor((Number(r.stock) || 0) / pSize) : (Number(r.stock) || 0));
+            const extra = r.extraQty !== undefined ? Number(r.extraQty) || 0 : (pSize > 1 ? (Number(r.stock) || 0) % pSize : 0);
+            return {
+              name: r.name.trim(),
+              batch: r.batch.trim(),
+              qty: Number(r.stock) || 1,
+              stockUnits: Number(r.stock) || 1,
+              extraQty: extra,
+              packSize: pSize,
+              pack: r.pack,
+              unit: r.unit,
+              rate: Number(r.cost) || 0,
+              gst: Number(r.gst) || 5,
+              mrp: Number(r.mrp) || 0,
+            };
+          });
 
-          const groupTotal = groupRows.reduce(
-            (sum, r) => sum + (Number(r.stock) || 0) * (Number(r.cost) || 0),
-            0
-          );
+          const groupInvoiceTotals = calculatePurchaseInvoiceTotals(purchaseItems);
 
           // actions.addPurchase automatically increases medicine stock without double-counting!
           const purchaseRes = await actions.addPurchase({
@@ -653,7 +710,7 @@ export function MedicineImportModal({
             supplierId: resolvedSupplierId,
             invoiceNo: finalInvoiceNo,
             items: purchaseItems,
-            total: Math.round(groupTotal),
+            total: Math.round(groupInvoiceTotals.grandTotal),
           });
 
           if (!purchaseRes?.error) {
@@ -1172,16 +1229,17 @@ export function MedicineImportModal({
                             <th className="py-2.5 px-2.5 min-w-[115px]">Batch</th>
                             <th className="py-2.5 px-2.5 min-w-[100px]">Expiry</th>
                             <th className="py-2.5 px-2.5 min-w-[95px]">MRP</th>
-                            <th className="py-2.5 px-2.5 min-w-[95px]">Purchase</th>
+                            <th className="py-2.5 px-2.5 min-w-[95px]">P. Rate</th>
                             <th className="py-2.5 px-2.5 min-w-[75px]">GST %</th>
-                            <th className="py-2.5 px-2.5 min-w-[75px]">Qty</th>
+                            <th className="py-2.5 px-2.5 min-w-[85px]">Qty (Packs)</th>
+                            <th className="py-2.5 px-2.5 min-w-[80px]">Extra Qty</th>
                             <th className="py-2.5 px-2.5 min-w-[90px]">Unit</th>
+                            <th className="py-2.5 px-2.5 min-w-[130px] text-right">Stock (Base Units)</th>
                             <th className="py-2.5 px-2 w-12 text-center" />
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-border text-xs">
                           {groupRows.map((row, idx) => {
-                            const matchResult = matchMedicine(row);
                             return (
                               <tr
                                 key={row.id || idx}
@@ -1192,20 +1250,36 @@ export function MedicineImportModal({
                                   {idx + 1}
                                 </td>
 
-                                {/* 2. Medicine Lookup Status */}
+                                {/* 2. Medicine Duplicate Status */}
                                 <td className="py-2 px-2 text-center whitespace-nowrap">
-                                  {matchResult ? (
-                                    <span
-                                      className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800"
-                                      title={`Matched with existing Medicine Master: ${matchResult.med.name} (Batch: ${matchResult.med.batch || "—"})`}
-                                    >
-                                      Matched
-                                    </span>
-                                  ) : (
-                                    <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-sky-50 text-sky-700 dark:bg-sky-950/60 dark:text-sky-300 border border-sky-200 dark:border-sky-800">
-                                      NEW
-                                    </span>
-                                  )}
+                                  {(() => {
+                                    const dr = getDuplicateResult(row.id!);
+                                    if (dr.status === "existing") {
+                                      return (
+                                        <span
+                                          className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 cursor-default"
+                                          title={`Existing medicine: ${dr.match?.name} (${dr.match?.code ?? dr.match?.id})`}
+                                        >
+                                          Existing · {dr.match?.code ?? ""}
+                                        </span>
+                                      );
+                                    }
+                                    if (dr.status === "review") {
+                                      return (
+                                        <span
+                                          className="px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-50 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-200 dark:border-amber-800 cursor-default"
+                                          title={`Possible match: ${dr.match?.name} (${dr.match?.code ?? dr.match?.id}) — composition differs. Review before confirming.`}
+                                        >
+                                          Review
+                                        </span>
+                                      );
+                                    }
+                                    return (
+                                      <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-sky-50 text-sky-700 dark:bg-sky-950/60 dark:text-sky-300 border border-sky-200 dark:border-sky-800">
+                                        New
+                                      </span>
+                                    );
+                                  })()}
                                 </td>
 
                                 {/* 3. Medicine name */}
@@ -1361,14 +1435,15 @@ export function MedicineImportModal({
                                   />
                                 </td>
 
-                                {/* 14. Qty */}
+                                {/* 14. Qty (Packs) */}
                                 <td className="py-2 px-2.5">
                                   <Input
                                     type="number"
-                                    value={row.stock}
+                                    min={0}
+                                    value={row.qtyPacks ?? (row.packSize && row.packSize > 1 ? Math.floor((row.stock || 0) / row.packSize) : (row.stock ?? 1))}
                                     onChange={(e) =>
                                       updateRow(row.id!, {
-                                        stock: Number(e.target.value) || 0,
+                                        qtyPacks: Math.max(0, parseInt(e.target.value, 10) || 0),
                                       })
                                     }
                                     className="h-9 text-xs text-center font-medium rounded-lg border-gray-200 dark:border-gray-800 bg-white dark:bg-background [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
@@ -1376,7 +1451,23 @@ export function MedicineImportModal({
                                   />
                                 </td>
 
-                                {/* 15. Unit */}
+                                {/* 15. Extra Qty */}
+                                <td className="py-2 px-2.5">
+                                  <Input
+                                    type="number"
+                                    min={0}
+                                    value={row.extraQty ?? 0}
+                                    onChange={(e) =>
+                                      updateRow(row.id!, {
+                                        extraQty: Math.max(0, parseInt(e.target.value, 10) || 0),
+                                      })
+                                    }
+                                    className="h-9 text-xs text-center font-medium rounded-lg border-gray-200 dark:border-gray-800 bg-white dark:bg-background [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                                    placeholder="0"
+                                  />
+                                </td>
+
+                                {/* 16. Unit */}
                                 <td className="py-2 px-2.5">
                                   <Input
                                     value={row.unit || row.type || "Tablet"}
@@ -1384,8 +1475,20 @@ export function MedicineImportModal({
                                       updateRow(row.id!, { unit: e.target.value })
                                     }
                                     className="h-9 text-xs rounded-lg border-gray-200 dark:border-gray-800 bg-white dark:bg-background"
-                                    placeholder="Strip / Tablet"
+                                    placeholder="Tablet"
                                   />
+                                </td>
+
+                                {/* 17. Stock (Base Units) */}
+                                <td className="py-2 px-2.5 text-right whitespace-nowrap">
+                                  <div className="font-semibold text-xs text-foreground tabular-nums">
+                                    {row.stock ?? 0} {row.unit || "Units"}
+                                  </div>
+                                  {(row.packSize || 1) > 1 && (
+                                    <div className="text-[10px] text-muted-foreground tabular-nums">
+                                      {formatStockDisplay(row.stock || 0, row.packSize || 1, row.unit, row.pack).breakdown}
+                                    </div>
+                                  )}
                                 </td>
 
                                 {/* 16. Delete Action */}

@@ -11,10 +11,12 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as AppRouteImport } from './routes/_app'
 import { Route as LoginRouteImport } from './routes/login'
+import { Route as MedicineLookupRouteImport } from './routes/medicine-lookup'
 import { Route as SuperadminRouteImport } from './routes/superadmin'
 import { Route as AppIndexRouteImport } from './routes/_app/index'
 import { Route as AppAccountsRouteImport } from './routes/_app/accounts'
 import { Route as AppAuditRouteImport } from './routes/_app/audit'
+import { Route as AppAuditInventoryRouteImport } from './routes/_app/audit-inventory'
 import { Route as AppBackupRouteImport } from './routes/_app/backup'
 import { Route as AppBarcodeRouteImport } from './routes/_app/barcode'
 import { Route as AppCustomersRouteImport } from './routes/_app/customers'
@@ -25,6 +27,7 @@ import { Route as AppHelpRouteImport } from './routes/_app/help'
 import { Route as AppInventoryRouteImport } from './routes/_app/inventory'
 import { Route as AppLoansRouteImport } from './routes/_app/loans'
 import { Route as AppMedicinesRouteImport } from './routes/_app/medicines'
+import { Route as AppPaymentsRouteImport } from './routes/_app/payments'
 import { Route as AppPurchaseRouteImport } from './routes/_app/purchase'
 import { Route as AppPurchaseReturnsRouteImport } from './routes/_app/purchase-returns'
 import { Route as AppQrRouteImport } from './routes/_app/qr'
@@ -41,6 +44,11 @@ const AppRoute = AppRouteImport.update({
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MedicineLookupRoute = MedicineLookupRouteImport.update({
+  id: '/medicine-lookup',
+  path: '/medicine-lookup',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SuperadminRoute = SuperadminRouteImport.update({
@@ -61,6 +69,11 @@ const AppAccountsRoute = AppAccountsRouteImport.update({
 const AppAuditRoute = AppAuditRouteImport.update({
   id: '/audit',
   path: '/audit',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppAuditInventoryRoute = AppAuditInventoryRouteImport.update({
+  id: '/audit-inventory',
+  path: '/audit-inventory',
   getParentRoute: () => AppRoute,
 } as any)
 const AppBackupRoute = AppBackupRouteImport.update({
@@ -113,6 +126,11 @@ const AppMedicinesRoute = AppMedicinesRouteImport.update({
   path: '/medicines',
   getParentRoute: () => AppRoute,
 } as any)
+const AppPaymentsRoute = AppPaymentsRouteImport.update({
+  id: '/payments',
+  path: '/payments',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppPurchaseRoute = AppPurchaseRouteImport.update({
   id: '/purchase',
   path: '/purchase',
@@ -157,9 +175,11 @@ const AppSuppliersRoute = AppSuppliersRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
   '/login': typeof LoginRoute
+  '/medicine-lookup': typeof MedicineLookupRoute
   '/superadmin': typeof SuperadminRoute
   '/accounts': typeof AppAccountsRoute
   '/audit': typeof AppAuditRoute
+  '/audit-inventory': typeof AppAuditInventoryRoute
   '/backup': typeof AppBackupRoute
   '/barcode': typeof AppBarcodeRoute
   '/customers': typeof AppCustomersRoute
@@ -170,6 +190,7 @@ export interface FileRoutesByFullPath {
   '/inventory': typeof AppInventoryRoute
   '/loans': typeof AppLoansRoute
   '/medicines': typeof AppMedicinesRoute
+  '/payments': typeof AppPaymentsRoute
   '/purchase': typeof AppPurchaseRoute
   '/purchase-returns': typeof AppPurchaseReturnsRoute
   '/qr': typeof AppQrRoute
@@ -181,9 +202,11 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/login': typeof LoginRoute
+  '/medicine-lookup': typeof MedicineLookupRoute
   '/superadmin': typeof SuperadminRoute
   '/accounts': typeof AppAccountsRoute
   '/audit': typeof AppAuditRoute
+  '/audit-inventory': typeof AppAuditInventoryRoute
   '/backup': typeof AppBackupRoute
   '/barcode': typeof AppBarcodeRoute
   '/customers': typeof AppCustomersRoute
@@ -194,6 +217,7 @@ export interface FileRoutesByTo {
   '/inventory': typeof AppInventoryRoute
   '/loans': typeof AppLoansRoute
   '/medicines': typeof AppMedicinesRoute
+  '/payments': typeof AppPaymentsRoute
   '/purchase': typeof AppPurchaseRoute
   '/purchase-returns': typeof AppPurchaseReturnsRoute
   '/qr': typeof AppQrRoute
@@ -208,9 +232,11 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_app': typeof AppRouteWithChildren
   '/login': typeof LoginRoute
+  '/medicine-lookup': typeof MedicineLookupRoute
   '/superadmin': typeof SuperadminRoute
   '/_app/accounts': typeof AppAccountsRoute
   '/_app/audit': typeof AppAuditRoute
+  '/_app/audit-inventory': typeof AppAuditInventoryRoute
   '/_app/backup': typeof AppBackupRoute
   '/_app/barcode': typeof AppBarcodeRoute
   '/_app/customers': typeof AppCustomersRoute
@@ -221,6 +247,7 @@ export interface FileRoutesById {
   '/_app/inventory': typeof AppInventoryRoute
   '/_app/loans': typeof AppLoansRoute
   '/_app/medicines': typeof AppMedicinesRoute
+  '/_app/payments': typeof AppPaymentsRoute
   '/_app/purchase': typeof AppPurchaseRoute
   '/_app/purchase-returns': typeof AppPurchaseReturnsRoute
   '/_app/qr': typeof AppQrRoute
@@ -236,9 +263,11 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/login'
+    | '/medicine-lookup'
     | '/superadmin'
     | '/accounts'
     | '/audit'
+    | '/audit-inventory'
     | '/backup'
     | '/barcode'
     | '/customers'
@@ -249,6 +278,7 @@ export interface FileRouteTypes {
     | '/inventory'
     | '/loans'
     | '/medicines'
+    | '/payments'
     | '/purchase'
     | '/purchase-returns'
     | '/qr'
@@ -260,9 +290,11 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/login'
+    | '/medicine-lookup'
     | '/superadmin'
     | '/accounts'
     | '/audit'
+    | '/audit-inventory'
     | '/backup'
     | '/barcode'
     | '/customers'
@@ -273,6 +305,7 @@ export interface FileRouteTypes {
     | '/inventory'
     | '/loans'
     | '/medicines'
+    | '/payments'
     | '/purchase'
     | '/purchase-returns'
     | '/qr'
@@ -286,9 +319,11 @@ export interface FileRouteTypes {
     | '__root__'
     | '/_app'
     | '/login'
+    | '/medicine-lookup'
     | '/superadmin'
     | '/_app/accounts'
     | '/_app/audit'
+    | '/_app/audit-inventory'
     | '/_app/backup'
     | '/_app/barcode'
     | '/_app/customers'
@@ -299,6 +334,7 @@ export interface FileRouteTypes {
     | '/_app/inventory'
     | '/_app/loans'
     | '/_app/medicines'
+    | '/_app/payments'
     | '/_app/purchase'
     | '/_app/purchase-returns'
     | '/_app/qr'
@@ -313,6 +349,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   AppRoute: typeof AppRouteWithChildren
   LoginRoute: typeof LoginRoute
+  MedicineLookupRoute: typeof MedicineLookupRoute
   SuperadminRoute: typeof SuperadminRoute
 }
 
@@ -330,6 +367,13 @@ declare module '@tanstack/react-router' {
       path: '/login'
       fullPath: '/login'
       preLoaderRoute: typeof LoginRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/medicine-lookup': {
+      id: '/medicine-lookup'
+      path: '/medicine-lookup'
+      fullPath: '/medicine-lookup'
+      preLoaderRoute: typeof MedicineLookupRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/superadmin': {
@@ -358,6 +402,13 @@ declare module '@tanstack/react-router' {
       path: '/audit'
       fullPath: '/audit'
       preLoaderRoute: typeof AppAuditRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/_app/audit-inventory': {
+      id: '/_app/audit-inventory'
+      path: '/audit-inventory'
+      fullPath: '/audit-inventory'
+      preLoaderRoute: typeof AppAuditInventoryRouteImport
       parentRoute: typeof AppRoute
     }
     '/_app/backup': {
@@ -430,6 +481,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppMedicinesRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/payments': {
+      id: '/_app/payments'
+      path: '/payments'
+      fullPath: '/payments'
+      preLoaderRoute: typeof AppPaymentsRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/purchase': {
       id: '/_app/purchase'
       path: '/purchase'
@@ -492,6 +550,7 @@ declare module '@tanstack/react-router' {
 interface AppRouteChildren {
   AppAccountsRoute: typeof AppAccountsRoute
   AppAuditRoute: typeof AppAuditRoute
+  AppAuditInventoryRoute: typeof AppAuditInventoryRoute
   AppBackupRoute: typeof AppBackupRoute
   AppBarcodeRoute: typeof AppBarcodeRoute
   AppCustomersRoute: typeof AppCustomersRoute
@@ -502,6 +561,7 @@ interface AppRouteChildren {
   AppInventoryRoute: typeof AppInventoryRoute
   AppLoansRoute: typeof AppLoansRoute
   AppMedicinesRoute: typeof AppMedicinesRoute
+  AppPaymentsRoute: typeof AppPaymentsRoute
   AppPurchaseRoute: typeof AppPurchaseRoute
   AppPurchaseReturnsRoute: typeof AppPurchaseReturnsRoute
   AppQrRoute: typeof AppQrRoute
@@ -516,6 +576,7 @@ interface AppRouteChildren {
 const AppRouteChildren: AppRouteChildren = {
   AppAccountsRoute: AppAccountsRoute,
   AppAuditRoute: AppAuditRoute,
+  AppAuditInventoryRoute: AppAuditInventoryRoute,
   AppBackupRoute: AppBackupRoute,
   AppBarcodeRoute: AppBarcodeRoute,
   AppCustomersRoute: AppCustomersRoute,
@@ -526,6 +587,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppInventoryRoute: AppInventoryRoute,
   AppLoansRoute: AppLoansRoute,
   AppMedicinesRoute: AppMedicinesRoute,
+  AppPaymentsRoute: AppPaymentsRoute,
   AppPurchaseRoute: AppPurchaseRoute,
   AppPurchaseReturnsRoute: AppPurchaseReturnsRoute,
   AppQrRoute: AppQrRoute,
@@ -542,6 +604,7 @@ const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
 const rootRouteChildren: RootRouteChildren = {
   AppRoute: AppRouteWithChildren,
   LoginRoute: LoginRoute,
+  MedicineLookupRoute: MedicineLookupRoute,
   SuperadminRoute: SuperadminRoute,
 }
 export const routeTree = rootRouteImport

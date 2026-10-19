@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useEffect, useMemo, useState, useRef, Fragment } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,6 +11,9 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
 import {
   Search, RefreshCcw, RotateCcw, ChevronDown, ChevronUp, Trash2, AlertCircle,
 } from "lucide-react";
@@ -36,7 +39,10 @@ type ReturnLineState = {
   rate: number;          // unit MRP
   gst: number;
   originalQty: number;   // base units sold
+  alreadyReturnedQty: number; // base units previously returned
+  eligibleQty: number;   // originalQty - alreadyReturnedQty
   returnQty: number;     // base units to return (editable)
+  isSaleable: boolean;   // restore stock if physically accepted
   selected: boolean;
 };
 
@@ -53,6 +59,7 @@ function SalesReturnsPage() {
 
   // Return form state
   const [returnLines, setReturnLines] = useState<ReturnLineState[]>([]);
+  const [refundMethod, setRefundMethod] = useState<"cash" | "online" | "credit">("cash");
   const [reason, setReason] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -67,7 +74,7 @@ function SalesReturnsPage() {
     actions.syncSalesReturns();
   }, []);
 
-  const canCreate = me ? CAN[me.role].billing : false;
+  const canCreate = me ? (CAN[me.role]?.billing ?? true) : true;
 
   // ── Invoice search ──────────────────────────────────────────────────────────
   const filteredSales = useMemo(() => {
@@ -81,20 +88,39 @@ function SalesReturnsPage() {
   function selectSale(sale: Sale) {
     setSelectedSale(sale);
     setInvoiceQuery(sale.id);
-    // Build return lines from sale items
+    const prevReturns = salesReturns.filter((r) => r.originalSaleId === sale.id);
+
+    // Build return lines from sale items with eligible quantity protection
     setReturnLines(
-      sale.items.map((it: SaleItem) => ({
-        medicineId: it.id,
-        medicineName: it.name,
-        batch: it.batch,
-        expiry: "",  // not stored on SaleItem — populated from medicines if available
-        unit: (it as any).sellingUnit ?? "Units",
-        rate: (it as any).unitMrp !== undefined ? Number((it as any).unitMrp) : Number(it.mrp),
-        gst: Number(it.gst) || 0,
-        originalQty: Number((it as any).totalUnits !== undefined ? (it as any).totalUnits : it.qty) || 0,
-        returnQty: 0,
-        selected: false,
-      })),
+      (sale.items ?? []).map((it: SaleItem) => {
+        const prevReturned = prevReturns.reduce((sum, r) => {
+          const f = (r.items ?? []).find(
+            (ri) =>
+              (ri.medicineId && ri.medicineId === it.id) ||
+              ((ri.medicineName || "").toLowerCase().trim() === (it.name || "").toLowerCase().trim() &&
+                (ri.batch || "").toLowerCase().trim() === (it.batch || "").toLowerCase().trim())
+          );
+          return sum + (f ? Number(f.returnedQty) || 0 : 0);
+        }, 0);
+        const origQty = Number((it as any).totalUnits !== undefined ? (it as any).totalUnits : it.qty) || 0;
+        const eligQty = Math.max(0, origQty - prevReturned);
+
+        return {
+          medicineId: it.id,
+          medicineName: it.name,
+          batch: it.batch,
+          expiry: "",  // not stored on SaleItem — populated from medicines if available
+          unit: (it as any).sellingUnit ?? "Units",
+          rate: (it as any).unitMrp !== undefined ? Number((it as any).unitMrp) : Number(it.mrp),
+          gst: Number(it.gst) || 0,
+          originalQty: origQty,
+          alreadyReturnedQty: prevReturned,
+          eligibleQty: eligQty,
+          returnQty: 0,
+          isSaleable: true,
+          selected: false,
+        };
+      }),
     );
     setReason("");
   }
@@ -102,7 +128,7 @@ function SalesReturnsPage() {
   function toggleLine(idx: number) {
     setReturnLines((prev) =>
       prev.map((l, i) =>
-        i === idx ? { ...l, selected: !l.selected, returnQty: l.selected ? 0 : l.originalQty } : l,
+        i === idx ? { ...l, selected: !l.selected, returnQty: l.selected ? 0 : Math.min(1, l.eligibleQty) } : l,
       ),
     );
   }
@@ -111,9 +137,15 @@ function SalesReturnsPage() {
     setReturnLines((prev) =>
       prev.map((l, i) => {
         if (i !== idx) return l;
-        const clamped = Math.max(0, Math.min(l.originalQty, val));
+        const clamped = Math.max(0, Math.min(l.eligibleQty, val));
         return { ...l, returnQty: clamped, selected: clamped > 0 };
       }),
+    );
+  }
+
+  function toggleSaleable(idx: number) {
+    setReturnLines((prev) =>
+      prev.map((l, i) => (i === idx ? { ...l, isSaleable: !l.isSaleable } : l)),
     );
   }
 
@@ -157,8 +189,9 @@ function SalesReturnsPage() {
           rate: l.rate,
           gst: l.gst,
           returnAmount: +(l.returnQty * l.rate).toFixed(2),
+          isSaleable: l.isSaleable,
         })),
-        reason: reason.trim(),
+        reason: `${reason.trim()} · [Refund: ${refundMethod.toUpperCase()}]`,
       },
       me ? { id: me.id, name: me.name } : undefined,
     );
@@ -166,7 +199,7 @@ function SalesReturnsPage() {
     if (error) {
       toast.error(`Return failed: ${error}`);
     } else {
-      toast.success(`Return ${ret.returnNo} recorded · ₹${ret.returnAmount.toFixed(2)} · Stock restored`);
+      toast.success(`Return ${ret.returnNo} recorded · ₹${ret.returnAmount.toFixed(2)} · Refund: ${refundMethod.toUpperCase()}`);
       setCreateOpen(false);
       setSelectedSale(null);
       setInvoiceQuery("");
@@ -213,13 +246,13 @@ function SalesReturnsPage() {
         <Card className="p-4">
           <div className="text-xs text-muted-foreground">Total Returned Value</div>
           <div className="text-2xl font-semibold text-primary">
-            ₹{salesReturns.reduce((s, r) => s + r.returnAmount, 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}
+            ₹{salesReturns.reduce((s, r) => s + (Number(r.returnAmount) || 0), 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}
           </div>
         </Card>
         <Card className="p-4">
           <div className="text-xs text-muted-foreground">GST Refund Amount</div>
           <div className="text-2xl font-semibold text-amber-600">
-            ₹{salesReturns.reduce((s, r) => s + r.gstAmount, 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}
+            ₹{salesReturns.reduce((s, r) => s + (Number(r.gstAmount) || 0), 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}
           </div>
         </Card>
       </div>
@@ -261,73 +294,86 @@ function SalesReturnsPage() {
                   </TableCell>
                 </TableRow>
               )}
-              {filteredReturns.map((r) => (
-                <>
-                  <TableRow key={r.id} className="cursor-pointer" onClick={() => setExpandedReturn(expandedReturn === r.id ? null : r.id)}>
-                    <TableCell className="font-medium">{r.returnNo}</TableCell>
-                    <TableCell className="text-sm">{new Date(r.returnDate).toLocaleString("en-IN")}</TableCell>
-                    <TableCell>
-                      <Badge variant="outline" className="font-mono text-xs">{r.originalSaleId}</Badge>
-                    </TableCell>
-                    <TableCell>
-                      <div className="font-medium">{r.customerName}</div>
-                      <div className="text-xs text-muted-foreground">{r.phone || "walk-in"}</div>
-                    </TableCell>
-                    <TableCell>{r.items.length}</TableCell>
-                    <TableCell className="text-sm text-muted-foreground max-w-[160px] truncate">{r.reason || "—"}</TableCell>
-                    <TableCell className="text-right font-semibold tabular-nums text-destructive">
-                      ₹{r.returnAmount.toFixed(2)}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums text-amber-600 text-sm">
-                      ₹{r.gstAmount.toFixed(2)}
-                    </TableCell>
-                    <TableCell>
-                      {expandedReturn === r.id
-                        ? <ChevronUp className="h-4 w-4 text-muted-foreground" />
-                        : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
-                    </TableCell>
-                  </TableRow>
-                  {expandedReturn === r.id && (
-                    <TableRow key={`${r.id}_expanded`} className="bg-muted/30">
-                      <TableCell colSpan={9} className="p-0">
-                        <div className="px-6 py-3">
-                          <div className="text-xs font-semibold text-muted-foreground mb-2">
-                            Processed by: {r.processedByName || r.processedBy || "—"}
-                          </div>
-                          <Table>
-                            <TableHeader>
-                              <TableRow>
-                                <TableHead>Medicine</TableHead>
-                                <TableHead>Batch</TableHead>
-                                <TableHead className="text-center">Original Qty</TableHead>
-                                <TableHead className="text-center">Returned Qty</TableHead>
-                                <TableHead>Unit</TableHead>
-                                <TableHead className="text-right">Rate</TableHead>
-                                <TableHead className="text-center">GST%</TableHead>
-                                <TableHead className="text-right">Return Amt</TableHead>
-                              </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                              {r.items.map((it, i) => (
-                                <TableRow key={i}>
-                                  <TableCell className="font-medium">{it.medicineName}</TableCell>
-                                  <TableCell className="font-mono text-xs">{it.batch}</TableCell>
-                                  <TableCell className="text-center">{it.originalQty}</TableCell>
-                                  <TableCell className="text-center font-semibold text-destructive">{it.returnedQty}</TableCell>
-                                  <TableCell className="text-xs">{it.unit}</TableCell>
-                                  <TableCell className="text-right tabular-nums">₹{it.rate.toFixed(2)}</TableCell>
-                                  <TableCell className="text-center">{it.gst}%</TableCell>
-                                  <TableCell className="text-right font-semibold tabular-nums">₹{it.returnAmount.toFixed(2)}</TableCell>
-                                </TableRow>
-                              ))}
-                            </TableBody>
-                          </Table>
-                        </div>
+              {filteredReturns.map((r) => {
+                const dateStr = (() => {
+                  try {
+                    return r.returnDate ? new Date(r.returnDate).toLocaleString("en-IN") : "—";
+                  } catch {
+                    return r.returnDate || "—";
+                  }
+                })();
+                const retAmt = Number(r.returnAmount) || 0;
+                const gstAmt = Number(r.gstAmount) || 0;
+                const itemsCount = (r.items ?? []).length;
+
+                return (
+                  <Fragment key={r.id}>
+                    <TableRow className="cursor-pointer hover:bg-muted/30" onClick={() => setExpandedReturn(expandedReturn === r.id ? null : r.id)}>
+                      <TableCell className="font-medium">{r.returnNo}</TableCell>
+                      <TableCell className="text-sm">{dateStr}</TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className="font-mono text-xs">{r.originalSaleId}</Badge>
+                      </TableCell>
+                      <TableCell>
+                        <div className="font-medium">{r.customerName || "Walk-in"}</div>
+                        <div className="text-xs text-muted-foreground">{r.phone || "walk-in"}</div>
+                      </TableCell>
+                      <TableCell>{itemsCount}</TableCell>
+                      <TableCell className="text-sm text-muted-foreground max-w-[160px] truncate">{r.reason || "—"}</TableCell>
+                      <TableCell className="text-right font-semibold tabular-nums text-destructive">
+                        ₹{retAmt.toFixed(2)}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums text-amber-600 text-sm">
+                        ₹{gstAmt.toFixed(2)}
+                      </TableCell>
+                      <TableCell>
+                        {expandedReturn === r.id
+                          ? <ChevronUp className="h-4 w-4 text-muted-foreground" />
+                          : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
                       </TableCell>
                     </TableRow>
-                  )}
-                </>
-              ))}
+                    {expandedReturn === r.id && (
+                      <TableRow key={`${r.id}_expanded`} className="bg-muted/30">
+                        <TableCell colSpan={9} className="p-0">
+                          <div className="px-6 py-3">
+                            <div className="text-xs font-semibold text-muted-foreground mb-2">
+                              Processed by: {r.processedByName || r.processedBy || "—"}
+                            </div>
+                            <Table>
+                              <TableHeader>
+                                <TableRow>
+                                  <TableHead>Medicine</TableHead>
+                                  <TableHead>Batch</TableHead>
+                                  <TableHead className="text-center">Original Qty</TableHead>
+                                  <TableHead className="text-center">Returned Qty</TableHead>
+                                  <TableHead>Unit</TableHead>
+                                  <TableHead className="text-right">Rate</TableHead>
+                                  <TableHead className="text-center">GST%</TableHead>
+                                  <TableHead className="text-right">Return Amt</TableHead>
+                                </TableRow>
+                              </TableHeader>
+                              <TableBody>
+                                {(r.items ?? []).map((it, i) => (
+                                  <TableRow key={i}>
+                                    <TableCell className="font-medium">{it.medicineName || "—"}</TableCell>
+                                    <TableCell className="font-mono text-xs">{it.batch || "—"}</TableCell>
+                                    <TableCell className="text-center">{it.originalQty ?? 0}</TableCell>
+                                    <TableCell className="text-center font-semibold text-destructive">{it.returnedQty ?? 0}</TableCell>
+                                    <TableCell className="text-xs">{it.unit || "Units"}</TableCell>
+                                    <TableCell className="text-right tabular-nums">₹{Number(it.rate || 0).toFixed(2)}</TableCell>
+                                    <TableCell className="text-center">{it.gst ?? 0}%</TableCell>
+                                    <TableCell className="text-right font-semibold tabular-nums">₹{Number(it.returnAmount || 0).toFixed(2)}</TableCell>
+                                  </TableRow>
+                                ))}
+                              </TableBody>
+                            </Table>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </Fragment>
+                );
+              })}
             </TableBody>
           </Table>
         </div>
@@ -375,8 +421,16 @@ function SalesReturnsPage() {
                         {s.phone && <span className="ml-1.5 text-muted-foreground text-xs">· {s.phone}</span>}
                       </div>
                       <div className="text-right">
-                        <div className="font-semibold">₹{s.grand.toLocaleString("en-IN")}</div>
-                        <div className="text-xs text-muted-foreground">{new Date(s.date).toLocaleDateString("en-IN")}</div>
+                        <div className="font-semibold">₹{Number(s.grand || 0).toLocaleString("en-IN")}</div>
+                        <div className="text-xs text-muted-foreground">
+                          {(() => {
+                            try {
+                              return s.date ? new Date(s.date).toLocaleDateString("en-IN") : "—";
+                            } catch {
+                              return s.date || "—";
+                            }
+                          })()}
+                        </div>
                       </div>
                     </button>
                   ))}
@@ -386,10 +440,18 @@ function SalesReturnsPage() {
                 <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 flex items-center justify-between text-sm">
                   <div>
                     <span className="font-semibold font-mono text-primary">{selectedSale.id}</span>
-                    <span className="ml-2 font-medium">{selectedSale.customerName}</span>
-                    <span className="ml-1.5 text-muted-foreground text-xs">· {new Date(selectedSale.date).toLocaleDateString("en-IN")}</span>
+                    <span className="ml-2 font-medium">{selectedSale.customerName || "Walk-in"}</span>
+                    <span className="ml-1.5 text-muted-foreground text-xs">
+                      · {(() => {
+                        try {
+                          return selectedSale.date ? new Date(selectedSale.date).toLocaleDateString("en-IN") : "—";
+                        } catch {
+                          return selectedSale.date || "—";
+                        }
+                      })()}
+                    </span>
                   </div>
-                  <div className="font-semibold">₹{selectedSale.grand.toLocaleString("en-IN")}</div>
+                  <div className="font-semibold">₹{Number(selectedSale.grand || 0).toLocaleString("en-IN")}</div>
                 </div>
               )}
             </div>
@@ -401,13 +463,15 @@ function SalesReturnsPage() {
                 <div className="rounded-lg border overflow-hidden">
                   <Table>
                     <TableHeader>
-                      <TableRow className="bg-muted/50">
+                      <TableRow className="bg-muted/50 text-xs">
                         <TableHead className="w-10" />
                         <TableHead>Medicine</TableHead>
                         <TableHead>Batch</TableHead>
-                        <TableHead className="text-center">Sold Qty</TableHead>
+                        <TableHead className="text-center">Sold</TableHead>
+                        <TableHead className="text-center">Eligible</TableHead>
                         <TableHead className="text-center">Return Qty</TableHead>
-                        <TableHead className="text-right">Rate/Unit</TableHead>
+                        <TableHead className="text-center">Restock?</TableHead>
+                        <TableHead className="text-right">Rate</TableHead>
                         <TableHead className="text-right">Return Amt</TableHead>
                       </TableRow>
                     </TableHeader>
@@ -417,13 +481,14 @@ function SalesReturnsPage() {
                         return (
                           <TableRow
                             key={idx}
-                            className={cn(line.selected && "bg-primary/5")}
+                            className={cn(line.selected && "bg-primary/5", "text-xs")}
                           >
                             <TableCell>
                               <input
                                 type="checkbox"
                                 checked={line.selected}
                                 onChange={() => toggleLine(idx)}
+                                disabled={line.eligibleQty <= 0}
                                 className="h-4 w-4 rounded border-gray-300 text-primary cursor-pointer"
                               />
                             </TableCell>
@@ -432,31 +497,40 @@ function SalesReturnsPage() {
                               <div className="text-xs text-muted-foreground">GST {line.gst}%</div>
                             </TableCell>
                             <TableCell className="font-mono text-xs">{line.batch || "—"}</TableCell>
+                            <TableCell className="text-center font-mono">
+                              {line.originalQty} <span className="text-[10px] text-muted-foreground">{line.unit}</span>
+                            </TableCell>
                             <TableCell className="text-center">
-                              <Badge variant="secondary" className="font-mono">{line.originalQty}</Badge>
-                              <div className="text-[10px] text-muted-foreground mt-0.5">{line.unit}</div>
+                              <Badge variant={line.eligibleQty > 0 ? "secondary" : "outline"} className="font-mono text-xs">
+                                {line.eligibleQty}
+                              </Badge>
                             </TableCell>
                             <TableCell className="text-center">
                               <Input
                                 type="number"
                                 min={0}
-                                max={line.originalQty}
+                                max={line.eligibleQty}
                                 value={line.returnQty || ""}
                                 placeholder="0"
+                                disabled={line.eligibleQty <= 0}
                                 onFocus={(e) => e.target.select()}
                                 onChange={(e) => setReturnQty(idx, parseInt(e.target.value, 10) || 0)}
-                                className="h-8 w-20 mx-auto text-center text-sm font-semibold [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                                className="h-8 w-16 mx-auto text-center text-xs font-semibold [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                               />
-                              {line.returnQty > line.originalQty && (
-                                <div className="text-[10px] text-destructive mt-0.5">
-                                  Max {line.originalQty}
-                                </div>
-                              )}
                             </TableCell>
-                            <TableCell className="text-right tabular-nums text-sm">
+                            <TableCell className="text-center">
+                              <input
+                                type="checkbox"
+                                checked={line.isSaleable}
+                                onChange={() => toggleSaleable(idx)}
+                                title="Check to restock into inventory"
+                                className="h-4 w-4 rounded border-gray-300 text-emerald-600 cursor-pointer"
+                              />
+                            </TableCell>
+                            <TableCell className="text-right tabular-nums text-xs">
                               ₹{line.rate.toFixed(2)}
                             </TableCell>
-                            <TableCell className="text-right tabular-nums font-semibold text-sm text-destructive">
+                            <TableCell className="text-right tabular-nums font-semibold text-xs text-destructive">
                               {line.returnQty > 0 ? `₹${amt.toFixed(2)}` : "—"}
                             </TableCell>
                           </TableRow>
@@ -486,26 +560,46 @@ function SalesReturnsPage() {
               </div>
             )}
 
-            {/* Step 3: Reason */}
+            {/* Step 3: Refund Method and Reason */}
             {selectedSale && (
-              <div className="space-y-1.5">
-                <Label htmlFor="return-reason" className="text-xs font-semibold">Step 3 — Return Reason</Label>
-                <Input
-                  id="return-reason"
-                  placeholder="e.g. Damaged, Expired, Wrong medicine, Customer changed mind…"
-                  value={reason}
-                  onChange={(e) => setReason(e.target.value)}
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-semibold">Refund Method *</Label>
+                  <Select value={refundMethod} onValueChange={(v) => setRefundMethod(v as any)}>
+                    <SelectTrigger className="h-9 text-xs">
+                      <SelectValue placeholder="Select refund mode" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="cash">Cash Refund</SelectItem>
+                      <SelectItem value="online">Online / UPI Refund</SelectItem>
+                      <SelectItem value="credit">Credit Note / Ledger Adjustment</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="return-reason" className="text-xs font-semibold">Return Reason *</Label>
+                  <Input
+                    id="return-reason"
+                    placeholder="e.g. Damaged, Expired, Wrong medicine, Customer changed mind…"
+                    value={reason}
+                    onChange={(e) => setReason(e.target.value)}
+                    className="h-9 text-xs"
+                  />
+                </div>
               </div>
             )}
 
             {/* Warning */}
             {selectedSale && returnTotals.lines.length > 0 && (
-              <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-800">
+              <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
                 <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-amber-500" />
                 <div>
-                  Stock will be <strong>restored by {returnTotals.lines.reduce((s, l) => s + l.returnQty, 0)} base units</strong> across {returnTotals.lines.length} medicine(s).
-                  The original invoice <strong>will not be altered</strong>.
+                  Processing refund of <strong>₹{returnTotals.sub.toFixed(2)}</strong> via <strong>{refundMethod.toUpperCase()}</strong>.
+                  {returnTotals.lines.some((l) => l.isSaleable) ? (
+                    <> Stock will be restored for accepted saleable items.</>
+                  ) : (
+                    <> Stock will not be restored (marked damaged/unsaleable).</>
+                  )}
                 </div>
               </div>
             )}
