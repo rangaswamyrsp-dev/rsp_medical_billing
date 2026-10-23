@@ -19,12 +19,13 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   Plus, Search, Trash2, Pencil, FileSpreadsheet, Pill, Camera, Download, Layers,
-  Boxes, AlertTriangle, Clock, ArrowUpDown, MoreHorizontal, RotateCcw,
+  Boxes, AlertTriangle, Clock, ArrowUpDown, MoreHorizontal, MapPin, RotateCcw,
 } from "lucide-react";
 import { actions, useStore } from "@/lib/store";
 import { useTenant } from "@/lib/tenant";
 import type { Medicine } from "@/data/medicines";
 import { normalizeMedName } from "@/lib/medicines-supabase";
+import { resolveSmartStorageLocation } from "@/lib/storage-service";
 import { MedicineImportModal } from "@/components/app/MedicineImportModal";
 import { exportInventoryToExcel } from "@/lib/inventory-excel";
 import {
@@ -73,6 +74,44 @@ function MedicinesPage() {
   const [importOpen, setImportOpen] = useState(false);
   const [importTab, setImportTab] = useState<"photo" | "excel">("photo");
   const [editing, setEditing] = useState<Medicine | null>(null);
+  const [assigningStorage, setAssigningStorage] = useState(false);
+
+  const unassignedCount = useMemo(() => {
+    return meds.filter((m) => !m.rack && (!m.box_no || m.box_no === "Branded" || m.box_no === "Generic")).length;
+  }, [meds]);
+
+  const handleAutoAssignAll = async () => {
+    // direct execution without blocking native alert dialog
+    setAssigningStorage(true);
+    try {
+      const { count, error } = await actions.autoAssignAllUnassignedMedicines();
+      if (error) {
+        toast.error(`Auto-assignment error: ${error}`);
+      } else {
+        toast.success(`Successfully assigned Rack & Box locations to ${count} medicines!`);
+      }
+    } finally {
+      setAssigningStorage(false);
+    }
+  };
+
+  const handleAssignSingleMed = async (med: Medicine) => {
+    const rules = useStore.getState().storageRules || [];
+    const settings = useStore.getState().storageSettings;
+    const resolved = resolveSmartStorageLocation(med, rules, meds, settings);
+    if (!resolved || !resolved.rack) {
+      return toast.error("No free box or rack available. Check your Rack Management rules.");
+    }
+    const { error } = await actions.updateMedicine(med.id, {
+      rack: resolved.rack,
+      box_no: resolved.box_no || "",
+    });
+    if (error) {
+      toast.error(`Failed to assign: ${error}`);
+    } else {
+      toast.success(`Assigned ${med.name} to Rack ${resolved.rack}${resolved.box_no ? `, Box ${resolved.box_no}` : ""}`);
+    }
+  };
   const [form, setForm] = useState<Omit<Medicine, "id">>(EMPTY);
 
   // Filters state
@@ -518,6 +557,18 @@ function MedicinesPage() {
           >
             <Camera className="h-4 w-4 text-muted-foreground" /> Add from Photo
           </Button>
+          {unassignedCount > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleAutoAssignAll}
+              disabled={assigningStorage}
+              className="gap-1.5 h-9 rounded-lg text-xs font-semibold bg-amber-50 hover:bg-amber-100 text-amber-900 border-amber-300 dark:bg-amber-950/40 dark:border-amber-800 dark:text-amber-200 shadow-2xs"
+            >
+              <Boxes className={`h-4 w-4 text-amber-600 ${assigningStorage ? "animate-spin" : ""}`} />
+              {assigningStorage ? "Assigning Boxes..." : `Auto-Assign Boxes (${unassignedCount})`}
+            </Button>
+          )}
           <Button
             variant="outline"
             size="sm"
@@ -718,6 +769,7 @@ function MedicinesPage() {
 
                 {/* ── SEPARATE UNIT COLUMN (UNIT LABEL ONLY) ── */}
                 <TableHead className="w-20 px-3">Unit</TableHead>
+                <TableHead className="w-28 px-3 text-center">Rack + Box No.</TableHead>
 
                 <TableHead className="w-14 px-3 text-center">Actions</TableHead>
               </TableRow>
@@ -842,6 +894,25 @@ function MedicinesPage() {
                     {/* ── UNIT (UNIT LABEL ONLY) ── */}
                     <TableCell className="px-3 py-2.5 text-xs text-foreground font-medium">
                       {info.unitLabel}
+                    </TableCell>
+
+                    {/* Rack + Box No. */}
+                    <TableCell className="px-3 py-2.5 text-center">
+                      {(m.rack || (m.box_no && m.box_no !== "Branded" && m.box_no !== "Generic")) ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-mono text-[11px] font-semibold bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
+                          <MapPin className="h-3 w-3 text-blue-500 shrink-0" />
+                          {(m.rack && m.box_no && m.box_no !== "Branded" && m.box_no !== "Generic") ? `${m.rack}-${m.box_no}` : (m.rack || m.box_no || "-")}
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleAssignSingleMed(m)}
+                          className="text-muted-foreground/60 hover:text-primary text-[11px] font-medium hover:underline inline-flex items-center gap-1"
+                          title="Click to auto-assign a Box No."
+                        >
+                          <Plus className="h-3 w-3" /> Assign Box
+                        </button>
+                      )}
                     </TableCell>
 
                     {/* Actions Dropdown */}
@@ -1021,6 +1092,22 @@ function MedicinesPage() {
                 value={form.expiry}
                 onChange={(v) => setForm({ ...form, expiry: v })}
                 placeholder="2027-06"
+              />
+            </div>
+
+            {/* Location: Rack + Box No. */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Field
+                label="Rack / Shelf"
+                value={form.rack ?? ""}
+                onChange={(v) => setForm({ ...form, rack: v })}
+                placeholder="e.g. Rack A, R1"
+              />
+              <Field
+                label="Box No."
+                value={form.box_no && form.box_no !== "Branded" && form.box_no !== "Generic" ? form.box_no : ""}
+                onChange={(v) => setForm({ ...form, box_no: v })}
+                placeholder="e.g. Box 12, B04"
               />
             </div>
 

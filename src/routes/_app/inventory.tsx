@@ -78,7 +78,7 @@ function InventoryPage() {
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [mfrFilter, setMfrFilter] = useState("all");
   const [supplierFilter, setSupplierFilter] = useState("all");
-  const [stockFilter, setStockFilter] = useState<"all" | "in_stock" | "low" | "out" | "expiring" | "expired">("all");
+  const [stockFilter, setStockFilter] = useState<string>("all");
 
   useEffect(() => {
     actions.syncMedicines();
@@ -152,6 +152,8 @@ function InventoryPage() {
           m.hsn ?? "",
           m.type ?? "",
           m.category ?? "",
+          m.rack ?? "",
+          m.box_no ?? "",
         ].some((v) => v.toLowerCase().includes(q));
         if (!match) return false;
       }
@@ -655,6 +657,7 @@ function StockTable({ list }: { list: Medicine[] }) {
           <TableRow className="bg-muted/50">
             <TableHead className="w-16">Code</TableHead>
             <TableHead className="min-w-[200px]">Medicine Name</TableHead>
+            <TableHead className="text-center w-28 whitespace-nowrap">Rack + Box No.</TableHead>
             
             <TableHead>MFR</TableHead>
             <TableHead>Type</TableHead>
@@ -686,6 +689,15 @@ function StockTable({ list }: { list: Medicine[] }) {
                 <TableCell>
                   <div className="font-medium text-sm">{m.name}</div>
                   {m.generic && <div className="text-xs text-muted-foreground line-clamp-1">{m.generic}</div>}
+                </TableCell>
+                <TableCell className="text-center whitespace-nowrap">
+                  {(m.rack || (m.box_no && m.box_no !== "Branded" && m.box_no !== "Generic")) ? (
+                    <span className="inline-flex items-center gap-1 font-mono text-[11px] font-semibold px-2 py-0.5 rounded border bg-muted/30">
+                      {(m.rack && m.box_no && m.box_no !== "Branded" && m.box_no !== "Generic") ? `${m.rack}-${m.box_no}` : (m.rack || m.box_no || "-")}
+                    </span>
+                  ) : (
+                    <span className="text-[11px] text-muted-foreground italic">Unassigned</span>
+                  )}
                 </TableCell>
                 {/* <TableCell className="text-xs max-w-[140px] truncate" title={m.supplier || ""}>
                   {m.supplier || <span className="text-muted-foreground">—</span>}

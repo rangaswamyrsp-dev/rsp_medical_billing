@@ -77,13 +77,13 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "RSP Medical Billing · ANAM Medical Store" },
+      { title: "RSP MediBill · Medical Billing Software" },
       {
         name: "description",
         content:
           "Fast, keyboard-driven medical billing, inventory, GST and reports desktop software for ANAM Medical Store.",
       },
-      { property: "og:title", content: "RSP Medical Billing" },
+      { property: "og:title", content: "RSP MediBill" },
       {
         property: "og:description",
         content: "Billing, inventory, GST and reports for medical stores.",
@@ -99,7 +99,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
         href: "https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap",
       },
       { rel: "stylesheet", href: appCss },
-      { rel: "icon", href: "/favicon.ico", type: "image/x-icon" },
+      { rel: "icon", href: "/MEDIBILL.png", type: "image/jpeg" },
     ],
   }),
   shellComponent: RootShell,

@@ -1,3 +1,19 @@
+// Ensure WebSocket polyfill is registered before any SSR modules evaluate
+if (typeof globalThis !== "undefined" && typeof globalThis.WebSocket === "undefined") {
+  class SsrWebSocketShim {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    static CLOSING = 2;
+    static CLOSED = 3;
+    constructor() {}
+    addEventListener() {}
+    removeEventListener() {}
+    send() {}
+    close() {}
+  }
+  (globalThis as any).WebSocket = SsrWebSocketShim;
+}
+
 import "./lib/error-capture";
 
 import { consumeLastCapturedError } from "./lib/error-capture";

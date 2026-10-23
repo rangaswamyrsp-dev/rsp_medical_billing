@@ -10,6 +10,8 @@ import {
 
 export interface ParsedImportRow {
   id?: string;
+  rack?: string;
+  box_no?: string;
   name: string;
   supplier?: string;
   invoiceNo?: string;
@@ -279,6 +281,8 @@ function processImportRow(
     extraQty: number;
     importedStock?: number;
     unit?: string;
+    rack?: string;
+    box_no?: string;
     source?: string;
   },
   idx: number
@@ -358,6 +362,8 @@ function processImportRow(
     gst: raw.gst,
     qtyPacks: raw.qtyPacks,
     extraQty: raw.extraQty,
+    rack: raw.rack?.trim() || "",
+    box_no: raw.box_no?.trim() || "",
     stock: calculatedStock,
     importedStock: raw.importedStock,
     stockDiscrepancy,
@@ -419,6 +425,8 @@ export async function parseMedicineExcelFile(file: File): Promise<ParsedImportRo
   const extraQtyKey = findKey(["extraqty", "extra", "looseqty", "loose", "extraunits"]);
   const stockKey = findKey(["stock", "stockbaseunits", "baseunits", "totalunits", "totalstock"]);
   const unitKey = findKey(["unit", "units", "uom", "sellingunit", "baseunit"]);
+  const rackKey = findKey(["rack", "rackno", "shelf", "shelfno", "location"]);
+  const boxKey = findKey(["box", "boxno", "bin", "binno"]);
 
   const result: ParsedImportRow[] = [];
 
@@ -446,6 +454,8 @@ export async function parseMedicineExcelFile(file: File): Promise<ParsedImportRo
     const rawExtra = extraQtyKey ? Number(String(row[extraQtyKey]).replace(/[^0-9.]/g, "")) || 0 : 0;
     const rawStock = stockKey ? Number(String(row[stockKey]).replace(/[^0-9.]/g, "")) : undefined;
     const unit = unitKey ? String(row[unitKey] ?? "").trim() : "";
+    const rack = rackKey ? String(row[rackKey] ?? "").trim() : "";
+    const box_no = boxKey ? String(row[boxKey] ?? "").trim() : "";
 
     const processed = processImportRow(
       {
@@ -527,6 +537,8 @@ export function parseMedicinePastedText(rawText: string): ParsedImportRow[] {
   const extraQtyIdx = isHeader ? findIdx(["extraqty", "extra", "looseqty", "loose"]) : -1;
   const stockIdx = isHeader ? findIdx(["stock", "stockbaseunits", "baseunits"]) : -1;
   const unitIdx = isHeader ? findIdx(["unit", "units", "uom", "sellingunit"]) : -1;
+  const rackIdx = isHeader ? findIdx(["rack", "rackno", "shelf", "location"]) : -1;
+  const boxIdx = isHeader ? findIdx(["box", "boxno", "bin"]) : -1;
 
   const actualNameIdx = isHeader ? nameIdx : 0;
   const results: ParsedImportRow[] = [];
@@ -553,6 +565,8 @@ export function parseMedicinePastedText(rawText: string): ParsedImportRow[] {
     const rawExtra = extraQtyIdx !== -1 ? Number(String(cols[extraQtyIdx]).replace(/[^0-9.]/g, "")) || 0 : 0;
     const rawStock = stockIdx !== -1 ? Number(String(cols[stockIdx]).replace(/[^0-9.]/g, "")) : undefined;
     const unit = unitIdx !== -1 ? cols[unitIdx] || "" : "";
+    const rack = rackIdx !== -1 ? cols[rackIdx] || "" : "";
+    const box_no = boxIdx !== -1 ? cols[boxIdx] || "" : "";
 
     const processed = processImportRow(
       {

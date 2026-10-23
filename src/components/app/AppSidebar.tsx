@@ -1,5 +1,7 @@
-import { Link, useRouterState, useNavigate } from "@tanstack/react-router";
 import {
+  Link, useRouterState, useNavigate } from "@tanstack/react-router";
+import {
+  Boxes,
   LayoutDashboard, Receipt, ShoppingCart, PackageSearch, Pill, Users, Truck,
   UserCog, BarChart3, Percent, Wallet, ScanBarcode, QrCode, Settings, DatabaseBackup, LogOut,
   HelpCircle, ShieldCheck, PanelLeftClose, PanelLeftOpen, CreditCard, RotateCcw, Banknote, ClipboardCheck,
@@ -60,6 +62,7 @@ export const NAV_GROUPS: NavGroup[] = [
     badgeBg: "bg-blue-600 text-white",
     items: [
       { to: "/medicines", label: "Medicine Master", icon: Pill, cap: "medicines", feat: "medicines", itemsLabel: true },
+      { to: "/rack-management", label: "Rack Management", icon: Boxes, cap: "inventory", feat: "inventory" },
       { to: "/inventory", label: "Inventory", icon: PackageSearch, cap: "inventory", feat: "inventory" },
       { to: "/audit-inventory", label: "Audit Inventory", icon: ClipboardCheck, cap: "inventory", feat: "inventory" },
       { to: "/barcode", label: "Barcode", icon: ScanBarcode, cap: "barcode", feat: "barcode" },
@@ -357,15 +360,19 @@ export function SidebarBrand({ collapsed, onToggle }: { collapsed?: boolean; onT
 
   return (
     <div className={cn("flex items-center gap-2.5 h-16 border-b border-sidebar-border", collapsed ? "justify-center px-0" : "px-4")}>
-      <img
-        src="/rsp-logo.png"
-        alt="RSP Medical Billing"
-        className="h-9 w-9 shrink-0 object-contain rounded-lg"
-      />
+      <div className="relative h-10 w-10 overflow-hidden rounded-xl bg-white border border-border flex items-center justify-center shrink-0 shadow-2xs">
+        <img
+          src="/MEDIBILL.png"
+          alt="RSP MediBill"
+          className="h-full w-full object-cover object-center object-contain"
+        />
+      </div>
       {!collapsed && (
         <div className="leading-tight min-w-0 flex-1">
-          <div className="text-sm font-bold text-foreground truncate">RSP Billing</div>
-          <div className="text-[11px] text-muted-foreground font-medium truncate">{tenant.name || "RSP Medical"}</div>
+          <div className="text-sm font-bold text-foreground truncate flex items-center gap-1.5">
+            <span>RSP MediBill</span>
+          </div>
+          <div className="text-[11px] text-muted-foreground font-medium truncate">{tenant.name || "Medical Store"}</div>
         </div>
       )}
       {onToggle && (

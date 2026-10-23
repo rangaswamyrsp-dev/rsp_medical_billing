@@ -1,4 +1,5 @@
-import { useState, useRef, useEffect, useMemo } from "react";
+import {
+  useState, useRef, useEffect, useMemo } from "react";
 import {
   Dialog,
   DialogContent,
@@ -10,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  Boxes,
   Camera,
   FileSpreadsheet,
   Trash2,
@@ -25,6 +27,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { actions, useStore } from "@/lib/store";
+import { resolveSmartStorageLocation, allocateStorageLocationsBatch } from "@/lib/storage-service";
 import { useTenant } from "@/lib/tenant";
 import { getUser } from "@/lib/auth";
 import type { Medicine } from "@/data/medicines";
@@ -207,9 +210,17 @@ export function MedicineImportModal({
   const groupRowsIntoInvoices = (newRows: ParsedImportRow[], replace = false) => {
     const baseGroups = replace ? [] : [...invoiceGroups];
     const updatedGroups = [...baseGroups];
+    const currentMeds = useStore.getState().medicines;
+    const existingModalMeds = replace ? [] : rows;
+    const allExistingForAllocation = [
+      ...currentMeds,
+      ...existingModalMeds.map((m) => ({ rack: m.rack, box_no: m.box_no } as any)),
+    ];
+    // Allocate 6 items per box, 19 usable boxes per rack (boxes 20 & 21 empty)
+    const allocatedLocations = allocateStorageLocationsBatch(newRows, allExistingForAllocation, 6, 19);
     const newlyAddedExtendedRows: ExtendedImportRow[] = [];
 
-    newRows.forEach((r) => {
+    newRows.forEach((r, idx) => {
       const supKey = (r.supplier || "").trim();
       const invKey = (r.invoiceNo || "").trim();
       const dtKey = (r.supplierDate || "").trim();
@@ -233,8 +244,15 @@ export function MedicineImportModal({
         updatedGroups.push(matchedGroup);
       }
 
+      // Pre-fill rack & box if missing from Excel (allocated 6 per box)
+      const allocated = allocatedLocations[idx] || { rack: "R01", box_no: "B001" };
+      const rowRack = r.rack?.trim() || allocated.rack;
+      const rowBox = r.box_no?.trim() || allocated.box_no;
+
       newlyAddedExtendedRows.push({
         ...r,
+        rack: rowRack,
+        box_no: rowBox,
         invoiceGroupId: matchedGroup.id,
         supplier: matchedGroup.supplier,
         invoiceNo: matchedGroup.invoiceNo,
@@ -248,6 +266,26 @@ export function MedicineImportModal({
     } else {
       setRows((prevRows) => [...prevRows, ...newlyAddedExtendedRows]);
     }
+  };
+
+  // Auto-reassign all rows currently in the modal to 6 items per box
+  const handleAutoAssignAllModalRows = () => {
+    if (rows.length === 0) return;
+    const currentMeds = useStore.getState().medicines;
+    const allocated = allocateStorageLocationsBatch(
+      rows.map((r) => ({ ...r, rack: undefined, box_no: undefined })),
+      currentMeds,
+      6,
+      19
+    );
+    setRows((prev) =>
+      prev.map((r, i) => ({
+        ...r,
+        rack: allocated[i]?.rack || "R01",
+        box_no: allocated[i]?.box_no || "B001",
+      }))
+    );
+    toast.success(`Assigned ${rows.length} medicines into boxes (6 items per box)`);
   };
 
   // Update Group Header fields
@@ -664,7 +702,15 @@ export function MedicineImportModal({
                   stock: finalSupplier && finalInvoiceNo ? 0 : Number(r.stock) || 0,
                   supplier: finalSupplier || undefined,
                   supplierId: resolvedSupplierId,
+                  rack: r.rack?.trim() || existingProduct?.rack || undefined,
+                  box_no: r.box_no?.trim() || (existingProduct?.box_no && existingProduct.box_no !== "Branded" && existingProduct.box_no !== "Generic" ? existingProduct.box_no : undefined),
                 });
+                if (existingProduct && (r.rack?.trim() || r.box_no?.trim())) {
+                  actions.updateMedicine(existingProduct.id, {
+                    rack: r.rack?.trim() || existingProduct.rack,
+                    box_no: r.box_no?.trim() || existingProduct.box_no,
+                  });
+                }
               }
             }
           }
@@ -1235,6 +1281,7 @@ export function MedicineImportModal({
                             <th className="py-2.5 px-2.5 min-w-[80px]">Extra Qty</th>
                             <th className="py-2.5 px-2.5 min-w-[90px]">Unit</th>
                             <th className="py-2.5 px-2.5 min-w-[130px] text-right">Stock (Base Units)</th>
+                            <th className="py-2.5 px-2.5 min-w-[140px] text-center">Rack + Box No.</th>
                             <th className="py-2.5 px-2 w-12 text-center" />
                           </tr>
                         </thead>
@@ -1491,6 +1538,27 @@ export function MedicineImportModal({
                                   )}
                                 </td>
 
+                                {/* 18. Rack + Box No. */}
+                                <td className="py-2 px-2.5 text-center">
+                                  <div className="flex items-center justify-center gap-1">
+                                    <Input
+                                      value={row.rack || ""}
+                                      onChange={(e) => updateRow(row.id!, { rack: e.target.value })}
+                                      className="h-8 text-xs font-mono text-center rounded-lg border-gray-200 dark:border-gray-800 bg-white dark:bg-background w-16 px-1"
+                                      placeholder="Rack"
+                                      title="Rack / Shelf No."
+                                    />
+                                    <span className="text-muted-foreground text-xs font-bold">+</span>
+                                    <Input
+                                      value={row.box_no || ""}
+                                      onChange={(e) => updateRow(row.id!, { box_no: e.target.value })}
+                                      className="h-8 text-xs font-mono text-center rounded-lg border-gray-200 dark:border-gray-800 bg-white dark:bg-background w-16 px-1"
+                                      placeholder="Box"
+                                      title="Box No."
+                                    />
+                                  </div>
+                                </td>
+
                                 {/* 16. Delete Action */}
                                 <td className="py-2 px-2 text-center">
                                   <button
@@ -1525,6 +1593,18 @@ export function MedicineImportModal({
             )}
           </div>
           <div className="flex items-center gap-3">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={handleAutoAssignAllModalRows}
+              disabled={rows.length === 0 || saving}
+              className="h-9 px-3 text-xs font-medium rounded-lg border-blue-200 dark:border-blue-900 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40 gap-1.5"
+              title="Auto-assign 6 medicines per box across racks"
+            >
+              <Boxes className="h-3.5 w-3.5" />
+              Reassign Boxes (6/box)
+            </Button>
+
             <Button
               variant="outline"
               onClick={() => onOpenChange(false)}

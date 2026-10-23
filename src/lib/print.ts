@@ -37,7 +37,7 @@ export function receiptHTML(sale: Sale, p: PrinterSettings): string {
 
   const rows = sale.items
     .map((it) => {
-      const uLabel = (it.unitLabel || "").toLowerCase();
+      const uLabel = ((it as any).unitLabel || "").toLowerCase();
       const unitShort = uLabel.includes("tab") ? "tab" : uLabel.includes("cap") ? "cap" : uLabel.includes("ml") ? "ml" : uLabel ? uLabel.slice(0, 3) : "";
       const qtyDesc = unitShort ? `${it.qty} ${unitShort}` : `${it.qty}`;
       const rateVal = it.unitMrp !== undefined ? it.unitMrp : it.mrp;
@@ -56,7 +56,7 @@ export function receiptHTML(sale: Sale, p: PrinterSettings): string {
     .join("");
 
   return `<!doctype html>
-<html><head><meta charset="utf-8"><title>${escape(sale.id)}</title>
+<html><head><meta charset="utf-8"><title>RSP MediBill - ${escape(sale.id)}</title>
 <style>
   @page { size: ${width} auto; margin: 0; }
   * { box-sizing: border-box; -webkit-print-color-adjust: exact; print-color-adjust: exact; margin: 0; padding: 0; }
@@ -112,7 +112,11 @@ export function receiptHTML(sale: Sale, p: PrinterSettings): string {
   }
 </style></head>
 <body onload="setTimeout(()=>window.print(),200); window.onafterprint=()=>window.close();">
-  <div class="center">
+  <div class="center" style="margin-bottom: 6px;">
+    <div style="display: flex; align-items: center; justify-content: center; gap: 6px; margin-bottom: 3px;">
+      <img src="/rsp-medibill-logo.jpg" alt="RSP MediBill" style="height: 38px; width: auto; object-fit: contain; border-radius: 4px;" />
+    </div>
+    <div style="font-size: 11px; font-weight: 800; color: #0284c7; letter-spacing: 0.5px; margin-bottom: 2px;">RSP MEDIBILL</div>
     <div class="store">${escape(p.storeName || "ANAM MEDICAL STORE")}</div>
     ${p.storeAddress ? `<div class="muted">${escape(p.storeAddress)}</div>` : ""}
     ${p.storePhone ? `<div class="muted">Ph: ${escape(p.storePhone)}</div>` : ""}
@@ -168,7 +172,7 @@ export function receiptHTML(sale: Sale, p: PrinterSettings): string {
   
   <div class="footer">
     <div class="footer-msg">${escape(p.footer || "Thank you! Get well soon.")}</div>
-    <div class="footer-sub">${sale.items.length} items · Powered by RSP Billing</div>
+    <div class="footer-sub">${sale.items.length} items · Powered by RSP MediBill</div>
     <button class="noprint" onclick="window.print()" style="margin-top:10px;padding:4px 12px;font-size:11px;cursor:pointer">Print</button>
   </div>
 </body></html>`;

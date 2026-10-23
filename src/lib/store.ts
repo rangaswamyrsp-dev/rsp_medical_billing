@@ -1,3 +1,20 @@
+import {
+  type StorageSettings,
+  type StorageRule,
+  type StorageMovement,
+  DEFAULT_STORAGE_SETTINGS,
+  DEFAULT_STORAGE_RULES,
+  sb_fetchStorageSettings,
+  sb_saveStorageSettings,
+  sb_fetchStorageRules,
+  sb_saveStorageRule,
+  sb_deleteStorageRule,
+  sb_logStorageMovement,
+  isMedicineEligibleForAutoStorage,
+  findNextAvailableStorageBox,
+  resolveSmartStorageLocation,
+  allocateStorageLocationsBatch,
+} from "@/lib/storage-service";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { MEDICINES as SEED_MEDICINES, type Medicine } from "@/data/medicines";
 import { getActiveStoreKey, getActiveTenant } from "@/lib/tenant";
@@ -378,6 +395,8 @@ const SEED_EMPLOYEES: Employee[] = [
 const SEED_PURCHASES: Purchase[] = [];
 
 export type State = {
+  storageSettings: StorageSettings;
+  storageRules: StorageRule[];
   medicines: Medicine[];
   customers: Customer[];
   suppliers: Supplier[];
@@ -413,6 +432,8 @@ const DEFAULT_GST_PROFILE: GSTProfile = {
 };
 
 const DEMO: State = {
+  storageSettings: DEFAULT_STORAGE_SETTINGS,
+  storageRules: DEFAULT_STORAGE_RULES,
   medicines: SEED_MEDICINES,
   customers: SEED_CUSTOMERS,
   suppliers: SEED_SUPPLIERS,
@@ -433,6 +454,8 @@ const DEMO: State = {
 };
 
 const EMPTY: State = {
+  storageSettings: DEFAULT_STORAGE_SETTINGS,
+  storageRules: DEFAULT_STORAGE_RULES,
   medicines: [], customers: [], suppliers: [], employees: [], sales: [],
   purchases: [], salesReturns: [], purchaseReturns: [], printer: DEFAULT_PRINTER, audit: [], held: [],
   financeEntries: [], attendance: [], salaryPayments: [],
@@ -517,6 +540,38 @@ function getCurrentTenantId(): string {
   } catch {
     return "T001";
   }
+}
+
+
+
+export async function syncStorageRulesFromSupabase(tenantId?: string): Promise<StorageRule[]> {
+  const tid = tenantId || getCurrentTenantId();
+  if (!tid) return state.storageRules;
+  try {
+    const rules = await sb_fetchStorageRules(tid);
+    setState((s) => {
+      s.storageRules = rules;
+    });
+    return rules;
+  } catch (err) {
+    console.error("[store] syncStorageRules error:", err);
+  }
+  return state.storageRules;
+}
+
+export async function syncStorageSettingsFromSupabase(tenantId?: string): Promise<StorageSettings> {
+  const tid = tenantId || getCurrentTenantId();
+  if (!tid) return state.storageSettings;
+  try {
+    const settings = await sb_fetchStorageSettings(tid);
+    setState((s) => {
+      s.storageSettings = settings;
+    });
+    return settings;
+  } catch (err) {
+    console.error("[store] syncStorageSettings error:", err);
+  }
+  return state.storageSettings;
 }
 
 export async function syncMedicinesFromSupabase(tenantId?: string): Promise<Medicine[]> {
@@ -794,6 +849,8 @@ export function hydrate() {
   hydrated = true;
   emit();
   syncMedicinesFromSupabase().catch(() => {});
+  syncStorageSettingsFromSupabase().catch(() => {});
+  syncStorageRulesFromSupabase().catch(() => {});
   syncCustomersFromSupabase().catch(() => {});
   syncSuppliersFromSupabase().catch(() => {});
   syncPurchasesFromSupabase().catch(() => {});
@@ -941,6 +998,93 @@ export function nextProductCode(name: string, company?: string): string {
 }
 
 export const actions = {
+    syncStorageRules(tenantId?: string) {
+    return syncStorageRulesFromSupabase(tenantId);
+  },
+  async saveStorageRule(rule: StorageRule): Promise<{ error: string | null; rule?: StorageRule }> {
+    const tid = getCurrentTenantId();
+    const { error, rule: saved } = await sb_saveStorageRule(tid, rule);
+    if (saved) {
+      setState((s) => {
+        const idx = s.storageRules.findIndex((r) => r.id === saved.id);
+        if (idx >= 0) s.storageRules[idx] = saved;
+        else s.storageRules.push(saved);
+        s.storageRules.sort((a, b) => a.priority - b.priority);
+      });
+    }
+    return { error, rule: saved };
+  },
+  async deleteStorageRule(ruleId: string): Promise<{ error: string | null }> {
+    const tid = getCurrentTenantId();
+    const { error } = await sb_deleteStorageRule(tid, ruleId);
+    if (!error) {
+      setState((s) => {
+        s.storageRules = s.storageRules.filter((r) => r.id !== ruleId);
+      });
+    }
+    return { error };
+  },
+  syncStorageSettings(tenantId?: string) {
+    return syncStorageSettingsFromSupabase(tenantId);
+  },
+  async updateStorageSettings(patch: Partial<StorageSettings>): Promise<{ error: string | null; settings?: StorageSettings }> {
+    const tid = getCurrentTenantId();
+    const { error, settings } = await sb_saveStorageSettings(tid, patch);
+    if (settings) {
+      setState((s) => {
+        s.storageSettings = settings;
+      });
+    }
+    return { error, settings };
+  },
+  async moveMedicineLocation(
+    medicineId: string,
+    toRack: string,
+    toBox: string,
+    opts?: { movedBy?: string; reason?: string; quantity?: number }
+  ): Promise<{ error: string | null }> {
+    const tid = getCurrentTenantId();
+    const targetMed = state.medicines.find((x) => x.id === medicineId);
+    if (!targetMed) return { error: "Medicine not found" };
+
+    const fromRack = targetMed.rack || "";
+    const fromBox = targetMed.box_no || "";
+
+    setState((s) => {
+      const i = s.medicines.findIndex((x) => x.id === medicineId);
+      if (i >= 0) {
+        s.medicines[i] = {
+          ...s.medicines[i],
+          rack: toRack,
+          box_no: toBox,
+        };
+      }
+    });
+
+    await sb_logStorageMovement(tid, {
+      medicine_id: medicineId,
+      medicine_name: targetMed.name,
+      batch: targetMed.batch,
+      from_rack: fromRack,
+      from_box: fromBox,
+      to_rack: toRack,
+      to_box: toBox,
+      quantity: opts?.quantity || targetMed.stock,
+      moved_by: opts?.movedBy || "Staff",
+      reason: opts?.reason || "Storage reorganization",
+    });
+
+    audit({
+      actor: opts?.movedBy || "Staff",
+      action: "storage.move",
+      target: `${targetMed.name} (${targetMed.batch})`,
+      detail: `Moved from [${fromRack || "-"}/${fromBox || "-"}] to [${toRack}/${toBox}]`,
+    });
+
+    const { error } = await sb_updateMedicine(tid, medicineId, { rack: toRack, box_no: toBox });
+    return { error };
+  },
+
   syncMedicines(tenantId?: string) {
     return syncMedicinesFromSupabase(tenantId);
   },
@@ -956,8 +1100,22 @@ export const actions = {
     }
     const purchaseRate = m.new_rate !== undefined ? Number(m.new_rate) : (m.cost !== undefined ? Number(m.cost) : 0);
     const profit = Math.max(0, (Number(m.mrp) || 0) - purchaseRate);
+
+    // Smart storage assignment based on configured Rack Rules (Tablets, Syrups, Capsules, etc.)
+    let assignedRack = m.rack;
+    let assignedBox = m.box_no;
+    if (!assignedRack && (!assignedBox || assignedBox === "Branded" || assignedBox === "Generic")) {
+      const resolved = resolveSmartStorageLocation(m, state.storageRules, state.medicines, state.storageSettings);
+      if (resolved) {
+        assignedRack = resolved.rack;
+        assignedBox = resolved.box_no || "";
+      }
+    }
+
     const newMed: Medicine = {
       ...m,
+      rack: assignedRack,
+      box_no: assignedBox,
       cost: purchaseRate,
       new_rate: purchaseRate,
       profit,
@@ -997,6 +1155,111 @@ export const actions = {
     const { error } = await sb_deleteMedicine(tid, id);
     return { error };
   },
+      async reorganizeStorageAtoZ(): Promise<{ count: number; error: string | null }> {
+    const tid = getCurrentTenantId();
+    if (state.medicines.length === 0) return { count: 0, error: null };
+
+    // Sort strictly A to Z by trimmed medicine name
+    const sorted = [...state.medicines].sort((a, b) => a.name.trim().localeCompare(b.name.trim()));
+
+    // 19 usable boxes per rack, leaving positions 20 & 21 empty for manual assignment / new tablets
+    // 6 items per box, 19 usable boxes per rack (positions 20 & 21 empty for manual assignment)
+    const itemsPerBox = 6;
+    const usableBoxesPerRack = 19;
+    let currentRackIndex = 1;
+    let currentBoxIndex = 1;
+    let countInCurrentBox = 0;
+
+    const updates: Array<{ id: string; rack: string; box_no: string }> = [];
+
+    setState((s) => {
+      for (const m of sorted) {
+        const rackCode = `R${String(currentRackIndex).padStart(2, "0")}`;
+        const boxCode = `B${String(currentBoxIndex).padStart(3, "0")}`;
+
+        const idx = s.medicines.findIndex((x) => x.id === m.id);
+        if (idx >= 0) {
+          s.medicines[idx] = {
+            ...s.medicines[idx],
+            rack: rackCode,
+            box_no: boxCode,
+          };
+          updates.push({ id: m.id, rack: rackCode, box_no: boxCode });
+        }
+
+        countInCurrentBox++;
+        if (countInCurrentBox >= itemsPerBox) {
+          countInCurrentBox = 0;
+          currentBoxIndex++;
+          if (currentBoxIndex > usableBoxesPerRack) {
+            currentRackIndex++;
+            currentBoxIndex = 1;
+          }
+        }
+      }
+    });
+
+    audit({
+      actor: "system",
+      action: "storage.reorganize_atoz",
+      target: `${updates.length} medicines`,
+      detail: `Reorganized ${updates.length} medicines in A-Z order leaving 2 empty positions per rack`,
+    });
+
+    // Persist to Supabase in background
+    for (const u of updates) {
+      sb_updateMedicine(tid, u.id, { rack: u.rack, box_no: u.box_no }).catch(() => {});
+    }
+
+    return { count: updates.length, error: null };
+  },
+
+  async autoAssignAllUnassignedMedicines(): Promise<{ count: number; error: string | null }> {
+    const tid = getCurrentTenantId();
+    const unassigned = state.medicines.filter(
+      (m) => !m.rack && (!m.box_no || m.box_no === "Branded" || m.box_no === "Generic")
+    );
+    if (unassigned.length === 0) return { count: 0, error: null };
+
+    const runningList = state.medicines.filter(
+      (m) => m.rack || (m.box_no && m.box_no !== "Branded" && m.box_no !== "Generic")
+    );
+
+    const updates: Array<{ id: string; rack: string; box_no: string }> = [];
+    const batchAlloc = allocateStorageLocationsBatch(unassigned, runningList, 6, 19);
+
+    setState((s) => {
+      unassigned.forEach((target, i) => {
+        const alloc = batchAlloc[i];
+        if (alloc && alloc.rack) {
+          const idx = s.medicines.findIndex((x) => x.id === target.id);
+          if (idx >= 0) {
+            s.medicines[idx] = {
+              ...s.medicines[idx],
+              rack: alloc.rack,
+              box_no: alloc.box_no,
+            };
+            updates.push({ id: target.id, rack: alloc.rack, box_no: alloc.box_no });
+          }
+        }
+      });
+    });
+
+    audit({
+      actor: "system",
+      action: "storage.auto_assign_bulk",
+      target: `${updates.length} medicines`,
+      detail: `Auto-assigned storage locations to ${updates.length} unassigned medicines`,
+    });
+
+    // Persist each update to Supabase
+    for (const u of updates) {
+      sb_updateMedicine(tid, u.id, { rack: u.rack, box_no: u.box_no }).catch(() => {});
+    }
+
+    return { count: updates.length, error: null };
+  },
+
   async bulkAddMedicines(list: Omit<Medicine, "id">[]): Promise<{ error: string | null }> {
     const tid = getCurrentTenantId();
     if (list.length === 0) return { error: null };
@@ -1024,14 +1287,33 @@ export const actions = {
 
     const createdList: Medicine[] = [];
     const nowIso = new Date().toISOString();
+    // Running inventory to sequentially allocate boxes across this batch
+    const runningInventory = [...snapshot];
+    const batchAllocations = allocateStorageLocationsBatch(list, snapshot, 6, 19);
 
     list.forEach((m, i) => {
       const existingCode = resolveExistingCode(snapshot, m);
       const code = existingCode || codeByIndex.get(i) || resolveCode(snapshot, m);
       const purchaseRate = m.new_rate !== undefined ? Number(m.new_rate) : (m.cost !== undefined ? Number(m.cost) : 0);
       const profit = Math.max(0, (Number(m.mrp) || 0) - purchaseRate);
+
+      let assignedRack = m.rack?.trim() || "";
+      let assignedBox = m.box_no?.trim() || "";
+      if (assignedBox === "Branded" || assignedBox === "Generic") assignedBox = "";
+
+      // Auto-assign storage location if not manually set
+      if (!assignedRack && !assignedBox) {
+        const alloc = batchAllocations[i];
+        if (alloc) {
+          assignedRack = alloc.rack;
+          assignedBox = alloc.box_no;
+        }
+      }
+
       const item: Medicine = {
         ...m,
+        rack: assignedRack || undefined,
+        box_no: assignedBox || undefined,
         cost: purchaseRate,
         new_rate: purchaseRate,
         profit,
@@ -1040,6 +1322,7 @@ export const actions = {
         id: "M" + Date.now().toString(36) + "-" + (i + 1) + "-" + Math.random().toString(36).slice(2, 6),
       };
       createdList.push(item);
+      runningInventory.unshift(item);
     });
 
     setState((s) => {

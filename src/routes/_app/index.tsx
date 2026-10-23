@@ -117,8 +117,8 @@ function formatLocationDisplay(m: Medicine): string {
   const box = m.box_no && m.box_no !== "Branded" && m.box_no !== "Generic" ? m.box_no.trim() : "";
   if (rack && box) return `${rack}-${box}`;
   if (rack) return rack;
-  if (box) return `Box ${box}`;
-  return "Location not assigned";
+  if (box) return box;
+  return "Unassigned";
 }
 
 // ── Helper: Normalized Composition for Alternative Brands ───────────────────

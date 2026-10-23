@@ -31,6 +31,7 @@ import { Route as AppPaymentsRouteImport } from './routes/_app/payments'
 import { Route as AppPurchaseRouteImport } from './routes/_app/purchase'
 import { Route as AppPurchaseReturnsRouteImport } from './routes/_app/purchase-returns'
 import { Route as AppQrRouteImport } from './routes/_app/qr'
+import { Route as AppRackManagementRouteImport } from './routes/_app/rack-management'
 import { Route as AppReportsRouteImport } from './routes/_app/reports'
 import { Route as AppSalesRouteImport } from './routes/_app/sales'
 import { Route as AppSalesReturnsRouteImport } from './routes/_app/sales-returns'
@@ -146,6 +147,11 @@ const AppQrRoute = AppQrRouteImport.update({
   path: '/qr',
   getParentRoute: () => AppRoute,
 } as any)
+const AppRackManagementRoute = AppRackManagementRouteImport.update({
+  id: '/rack-management',
+  path: '/rack-management',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppReportsRoute = AppReportsRouteImport.update({
   id: '/reports',
   path: '/reports',
@@ -194,6 +200,7 @@ export interface FileRoutesByFullPath {
   '/purchase': typeof AppPurchaseRoute
   '/purchase-returns': typeof AppPurchaseReturnsRoute
   '/qr': typeof AppQrRoute
+  '/rack-management': typeof AppRackManagementRoute
   '/reports': typeof AppReportsRoute
   '/sales': typeof AppSalesRoute
   '/sales-returns': typeof AppSalesReturnsRoute
@@ -221,6 +228,7 @@ export interface FileRoutesByTo {
   '/purchase': typeof AppPurchaseRoute
   '/purchase-returns': typeof AppPurchaseReturnsRoute
   '/qr': typeof AppQrRoute
+  '/rack-management': typeof AppRackManagementRoute
   '/reports': typeof AppReportsRoute
   '/sales': typeof AppSalesRoute
   '/sales-returns': typeof AppSalesReturnsRoute
@@ -251,6 +259,7 @@ export interface FileRoutesById {
   '/_app/purchase': typeof AppPurchaseRoute
   '/_app/purchase-returns': typeof AppPurchaseReturnsRoute
   '/_app/qr': typeof AppQrRoute
+  '/_app/rack-management': typeof AppRackManagementRoute
   '/_app/reports': typeof AppReportsRoute
   '/_app/sales': typeof AppSalesRoute
   '/_app/sales-returns': typeof AppSalesReturnsRoute
@@ -282,6 +291,7 @@ export interface FileRouteTypes {
     | '/purchase'
     | '/purchase-returns'
     | '/qr'
+    | '/rack-management'
     | '/reports'
     | '/sales'
     | '/sales-returns'
@@ -309,6 +319,7 @@ export interface FileRouteTypes {
     | '/purchase'
     | '/purchase-returns'
     | '/qr'
+    | '/rack-management'
     | '/reports'
     | '/sales'
     | '/sales-returns'
@@ -338,6 +349,7 @@ export interface FileRouteTypes {
     | '/_app/purchase'
     | '/_app/purchase-returns'
     | '/_app/qr'
+    | '/_app/rack-management'
     | '/_app/reports'
     | '/_app/sales'
     | '/_app/sales-returns'
@@ -509,6 +521,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppQrRouteImport
       parentRoute: typeof AppRoute
     }
+    '/_app/rack-management': {
+      id: '/_app/rack-management'
+      path: '/rack-management'
+      fullPath: '/rack-management'
+      preLoaderRoute: typeof AppRackManagementRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/_app/reports': {
       id: '/_app/reports'
       path: '/reports'
@@ -565,6 +584,7 @@ interface AppRouteChildren {
   AppPurchaseRoute: typeof AppPurchaseRoute
   AppPurchaseReturnsRoute: typeof AppPurchaseReturnsRoute
   AppQrRoute: typeof AppQrRoute
+  AppRackManagementRoute: typeof AppRackManagementRoute
   AppReportsRoute: typeof AppReportsRoute
   AppSalesRoute: typeof AppSalesRoute
   AppSalesReturnsRoute: typeof AppSalesReturnsRoute
@@ -591,6 +611,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppPurchaseRoute: AppPurchaseRoute,
   AppPurchaseReturnsRoute: AppPurchaseReturnsRoute,
   AppQrRoute: AppQrRoute,
+  AppRackManagementRoute: AppRackManagementRoute,
   AppReportsRoute: AppReportsRoute,
   AppSalesRoute: AppSalesRoute,
   AppSalesReturnsRoute: AppSalesReturnsRoute,
